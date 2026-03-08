@@ -1,0 +1,129 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ArchAI dark palette mapped to shadcn/ui CSS variable contract */
+    --background: 0 0% 4%;           /* #0A0A0A archai-black */
+    --foreground: 0 0% 93%;
+
+    --card: 0 0% 12%;                /* #1F1F1F archai-charcoal */
+    --card-foreground: 0 0% 93%;
+
+    --popover: 0 0% 12%;
+    --popover-foreground: 0 0% 93%;
+
+    --primary: 22 60% 47%;           /* #C15D2E archai-orange */
+    --primary-foreground: 0 0% 98%;
+
+    --secondary: 0 0% 18%;           /* #2E2E2E archai-graphite */
+    --secondary-foreground: 0 0% 93%;
+
+    --muted: 0 0% 18%;
+    --muted-foreground: 0 0% 60%;    /* #4A4A4A-ish smoke */
+
+    --accent: 35 75% 60%;            /* #E8A24F archai-amber */
+    --accent-foreground: 0 0% 4%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 18%;              /* archai-graphite */
+    --input: 0 0% 18%;
+    --ring: 22 60% 47%;              /* archai-orange focus ring */
+
+    --radius: 0.375rem;
+  }
+
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  html {
+    /* dark class is set on <html> in app/layout.tsx — enabling Tailwind dark: variants */
+    scroll-behavior: smooth;
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Selection color */
+  ::selection {
+    background-color: rgba(193, 93, 46, 0.3);
+    color: #f5f5f5;
+  }
+
+  /* Custom scrollbar — thin dark style */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0A0A0A;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2E2E2E;
+    border-radius: 2px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #4A4A4A;
+  }
+}
+
+@layer utilities {
+  /* Blueprint grid texture — multi-scale architectural drawing grid */
+  .bg-blueprint-grid {
+    background-image:
+      linear-gradient(rgba(193, 93, 46, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(193, 93, 46, 0.06) 1px, transparent 1px),
+      linear-gradient(rgba(46, 46, 46, 0.45) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(46, 46, 46, 0.45) 1px, transparent 1px);
+    background-size: 200px 200px, 200px 200px, 40px 40px, 40px 40px;
+    background-position: center center;
+  }
+
+  /* Smoked glass panel effect */
+  .glass-panel {
+    @apply bg-archai-charcoal/60 backdrop-blur-md border border-archai-graphite/50;
+  }
+
+  /* Subtle glow for accent elements */
+  .glow-orange {
+    box-shadow: 0 0 20px rgba(193, 93, 46, 0.25), 0 0 40px rgba(193, 93, 46, 0.1);
+  }
+
+  /* Orange accent border glow */
+  .border-glow-orange {
+    box-shadow: 0 0 0 1px rgba(193, 93, 46, 0.4), 0 0 12px rgba(193, 93, 46, 0.15);
+  }
+
+  /* Text gradient for hero headlines */
+  .text-gradient-hero {
+    background: linear-gradient(135deg, #f5f5f5 0%, #C15D2E 60%, #E8A24F 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Engineered linework separator */
+  .divider-technical {
+    @apply border-t border-archai-graphite/60;
+    position: relative;
+  }
+  .divider-technical::before {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: 0;
+    width: 40px;
+    height: 1px;
+    background: linear-gradient(90deg, #C15D2E, transparent);
+  }
+}
