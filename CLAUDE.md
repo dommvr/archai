@@ -1,5 +1,9 @@
 # CLAUDE.md — ArchAI
 
+## Agent conventions
+**Canonical conventions live in `AGENTS.md`.**
+If `CLAUDE.md` and `AGENTS.md` conflict on conventions, follow `AGENTS.md`.
+
 > Working rules, architecture context, and playbooks for Claude sessions in this repo.
 > Update this file whenever a material architectural decision changes.
 
