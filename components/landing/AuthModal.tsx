@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Dialog,
@@ -26,11 +26,25 @@ export function AuthModal({ open, onOpenChange, defaultMode = 'login' }: AuthMod
   const [mode, setMode] = useState<AuthMode>(defaultMode)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const passwordsDoNotMatch = mode === 'signup' && confirmPassword.length > 0 && password !== confirmPassword
+
+  useEffect(() => {
+    if (open) {
+      setMode(defaultMode)
+      setConfirmPassword('')
+      setMessage(null)
+    }
+  }, [defaultMode, open])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (mode === 'signup' && password !== confirmPassword) {
+      return
+    }
+
     setLoading(true)
     setMessage(null)
 
@@ -133,6 +147,38 @@ export function AuthModal({ open, onOpenChange, defaultMode = 'login' }: AuthMod
             )}
           </AnimatePresence>
 
+          <AnimatePresence>
+            {mode === 'signup' && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="space-y-1.5"
+              >
+                <label htmlFor="confirm-password" className="text-xs text-muted-foreground uppercase tracking-wider">
+                  Confirm Password
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    id="confirm-password"
+                    type="password"
+                    placeholder="••••••••"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="pl-9"
+                    required
+                    autoComplete="new-password"
+                    aria-invalid={passwordsDoNotMatch}
+                  />
+                </div>
+                {passwordsDoNotMatch && (
+                  <p className="text-sm text-red-400">Passwords do not match.</p>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Feedback Message */}
           {message && (
             <motion.div
@@ -149,7 +195,7 @@ export function AuthModal({ open, onOpenChange, defaultMode = 'login' }: AuthMod
             </motion.div>
           )}
 
-          <Button type="submit" variant="archai" className="w-full" disabled={loading}>
+          <Button type="submit" variant="archai" className="w-full" disabled={loading || passwordsDoNotMatch}>
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
@@ -166,7 +212,7 @@ export function AuthModal({ open, onOpenChange, defaultMode = 'login' }: AuthMod
           {mode !== 'magic' && (
             <button
               type="button"
-              onClick={() => { setMode('magic'); setMessage(null) }}
+              onClick={() => { setMode('magic'); setMessage(null); setConfirmPassword('') }}
               className="w-full text-xs text-muted-foreground hover:text-white transition-colors py-1"
             >
               Sign in with magic link instead →
@@ -175,7 +221,7 @@ export function AuthModal({ open, onOpenChange, defaultMode = 'login' }: AuthMod
           {mode === 'login' && (
             <button
               type="button"
-              onClick={() => { setMode('signup'); setMessage(null) }}
+              onClick={() => { setMode('signup'); setMessage(null); setConfirmPassword('') }}
               className="w-full text-xs text-muted-foreground hover:text-white transition-colors py-1"
             >
               Don&apos;t have an account? Sign up
@@ -184,7 +230,7 @@ export function AuthModal({ open, onOpenChange, defaultMode = 'login' }: AuthMod
           {(mode === 'signup' || mode === 'magic') && (
             <button
               type="button"
-              onClick={() => { setMode('login'); setMessage(null) }}
+              onClick={() => { setMode('login'); setMessage(null); setConfirmPassword('') }}
               className="w-full text-xs text-muted-foreground hover:text-white transition-colors py-1"
             >
               Already have an account? Log in

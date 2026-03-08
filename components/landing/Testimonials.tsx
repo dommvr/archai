@@ -71,8 +71,10 @@ export function Testimonials() {
   const t = TESTIMONIALS[current]
 
   return (
-    <section className="py-24 px-6 bg-archai-charcoal border-y border-archai-graphite">
-      <div className="max-w-4xl mx-auto">
+    <section className="relative py-24 px-6 bg-archai-charcoal border-y border-archai-graphite overflow-hidden">
+      <div className="absolute inset-0 bg-blueprint-grid opacity-30 pointer-events-none" />
+
+      <div className="relative z-10 max-w-4xl mx-auto">
         <div className="text-center mb-12">
           <p className="text-xs font-medium tracking-widest uppercase text-archai-orange mb-4">
             From the Field

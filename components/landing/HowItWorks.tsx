@@ -27,8 +27,13 @@ const STEPS = [
 
 export function HowItWorks() {
   return (
-    <section id="how-it-works" className="py-24 px-6 bg-archai-charcoal border-y border-archai-graphite">
-      <div className="max-w-5xl mx-auto">
+    <section
+      id="how-it-works"
+      className="relative py-24 px-6 bg-archai-charcoal border-y border-archai-graphite overflow-hidden"
+    >
+      <div className="absolute inset-0 bg-blueprint-grid opacity-30 pointer-events-none" />
+
+      <div className="relative z-10 max-w-5xl mx-auto">
         <div className="text-center mb-16">
           <p className="text-xs font-medium tracking-widest uppercase text-archai-orange mb-4">
             Workflow

@@ -4,11 +4,11 @@ import { MetricsPanel } from '@/components/dashboard/MetricsPanel'
 import { Separator } from '@/components/ui/separator'
 
 /**
- * Dashboard Home Page — the main workspace view.
+ * Dashboard Home Page â€” the main workspace view.
  *
  * Layout:
  *   Left: Full-height 3D viewer (Speckle mount point)
- *   Right: AI Copilot chat (top) + Live Metrics (bottom)
+ *   Right: Live Metrics (top) + AI Copilot chat (bottom)
  *
  * The DashboardShell layout.tsx provides the outer shell
  * (topbar, sidebar, statusbar). This page renders the content area.
@@ -22,18 +22,18 @@ export default function DashboardPage() {
         <ViewerPanel />
       </div>
 
-      {/* Right Panel: Chat + Metrics */}
+      {/* Right Panel: Metrics + Chat */}
       <aside className="w-80 shrink-0 bg-archai-charcoal border-l border-archai-graphite flex flex-col overflow-hidden">
-        {/* AI Copilot Chat — top portion */}
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <ChatPanel />
+        {/* Live Metrics â€” top portion */}
+        <div className="shrink-0 max-h-72 overflow-y-auto">
+          <MetricsPanel />
         </div>
 
         <Separator />
 
-        {/* Live Metrics — bottom portion */}
-        <div className="shrink-0 max-h-72 overflow-y-auto">
-          <MetricsPanel />
+        {/* AI Copilot Chat â€” bottom portion */}
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <ChatPanel />
         </div>
       </aside>
     </div>
