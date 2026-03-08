@@ -57,6 +57,63 @@ ArchAI is a **viewer-centric, interoperable** design platform. It is NOT a Revit
 
 ---
 
+### Tool 1 V1 Scope — Smart Zoning & Code Checker
+
+Canonical location:
+- lib/precheck/*
+
+V1 measurable rules:
+- max building height
+- front setback
+- side setback left
+- side setback right
+- rear setback
+- max FAR
+- max lot coverage
+- parking ratio hook
+
+Run lifecycle:
+- created
+- ingesting_site
+- ingesting_docs
+- extracting_rules
+- syncing_model
+- computing_metrics
+- evaluating
+- generating_report
+- completed
+- failed
+
+Readiness score:
+- starts at 100
+- critical fail: -25
+- error fail: -15
+- warning fail: -7
+- ambiguous: -5
+- missing_input: -8
+- floor at 0
+- cap at 60 if parcel or zoning data missing
+- cap at 50 if no reviewed rules exist
+- score = 0 if no geometry snapshot exists
+
+V1 data scope:
+- 1 open-data city adapter
+- 1 paid-provider adapter stub
+- manual site/zoning override UI
+
+V1 realtime:
+- event-driven reruns only
+
+V1 viewer:
+- issue-to-object highlighting
+- site boundary overlay hook
+- setback overlay hook
+
+Important:
+- Deterministic evaluation for measurable rules only
+- LLMs may assist extraction, explanation, and ambiguity handling
+- LLMs must not decide measurable pass/fail results
+
 ## 3. Key Architecture Decisions
 
 ### Why Next.js App Router
