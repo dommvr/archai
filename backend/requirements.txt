@@ -1,0 +1,36 @@
+# ── Web framework ─────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# ── Validation ────────────────────────────────────────────────
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+email-validator>=2.2.0          # pydantic email fields
+
+# ── Supabase / Postgres ───────────────────────────────────────
+supabase>=2.8.0                 # async Supabase client
+httpx>=0.27.0                   # used internally by supabase-py + Speckle calls
+
+# ── Auth / JWT ────────────────────────────────────────────────
+PyJWT>=2.9.0
+cryptography>=43.0.0            # RS256 support if needed
+
+# ── Document ingestion ────────────────────────────────────────
+pypdf>=4.3.0                    # PDF text extraction (V1 — see TODO in document_ingestion.py)
+python-multipart>=0.0.12        # multipart/form-data file uploads
+
+# ── Async utilities ───────────────────────────────────────────
+anyio>=4.6.0
+
+# ── Dev / testing ─────────────────────────────────────────────
+python-dotenv>=1.0.0
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+httpx>=0.27.0                   # TestClient
+
+# ── Future integrations (comment in when ready) ───────────────
+# openai>=1.50.0                # LLM rule extraction + embeddings
+# langchain>=0.3.0              # LangGraph agent orchestration
+# langgraph>=0.2.0
+# tiktoken>=0.8.0               # token counting for chunking
+# specklepy>=2.23.0             # Speckle Python SDK

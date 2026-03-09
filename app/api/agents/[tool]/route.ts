@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseServerClient } from '@/lib/supabase/server'
 import type { ToolId } from '@/types'
+import {
+  CreatePrecheckRunInputSchema,
+  IngestSiteInputSchema,
+  IngestDocumentsInputSchema,
+  ExtractRulesInputSchema,
+  SyncSpeckleModelInputSchema,
+  EvaluateComplianceInputSchema,
+} from '@/lib/precheck/schemas'
 
 /**
  * Dynamic API route handler for all AI tool endpoints.
@@ -40,11 +48,12 @@ export async function POST(
     // Empty body is acceptable for some tool calls
   }
 
-  console.log(`→ Calling FastAPI /${tool}`, {
-    userId: user.id,
-    tool,
-    body,
-  })
+  console.log(`→ Calling FastAPI /${tool}`, { userId: user.id, tool, body })
+
+  // ── Precheck: action-based dispatch ─────────────────────────────────────────
+  if (tool === 'precheck') {
+    return handlePrecheckPost(body)
+  }
 
   // Tool-specific placeholder responses
   // FASTAPI CALL PLACEHOLDER — replace each case with:
@@ -145,8 +154,7 @@ export async function POST(
 }
 
 /**
- * GET handler — returns tool metadata/status
- * Useful for health checks and tool capability discovery
+ * GET handler — returns tool metadata/status, or precheck run details if ?runId= is provided.
  */
 export async function GET(
   request: NextRequest,
@@ -161,10 +169,154 @@ export async function GET(
 
   const { tool } = await params
 
+  if (tool === 'precheck') {
+    return handlePrecheckGet(request)
+  }
+
   return NextResponse.json({
     tool,
     status: 'placeholder',
     message: `Tool '${tool}' endpoint active — backend integration pending`,
     // FASTAPI CALL PLACEHOLDER
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Precheck handlers
+// FASTAPI CALL PLACEHOLDER — each action will proxy to FastAPI /precheck/*
+// LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
+// ─────────────────────────────────────────────────────────────────────────────
+
+function handlePrecheckPost(body: Record<string, unknown>): NextResponse {
+  const action = body.action
+  const payload = body.payload as Record<string, unknown> | undefined
+
+  if (typeof action !== 'string') {
+    return NextResponse.json({ error: 'Missing action field' }, { status: 400 })
+  }
+
+  switch (action) {
+    case 'create_run': {
+      const result = CreatePrecheckRunInputSchema.safeParse(payload)
+      if (!result.success) {
+        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      }
+      // FASTAPI CALL PLACEHOLDER
+      return NextResponse.json({
+        action,
+        status: 'stub',
+        runId: crypto.randomUUID(),
+        message: 'Precheck run created (stub) — FastAPI integration pending',
+      })
+    }
+
+    case 'ingest_site': {
+      const result = IngestSiteInputSchema.safeParse(payload)
+      if (!result.success) {
+        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      }
+      // FASTAPI CALL PLACEHOLDER
+      return NextResponse.json({
+        action,
+        status: 'stub',
+        message: 'Site context ingested (stub) — site data provider integration pending',
+      })
+    }
+
+    case 'ingest_documents': {
+      const result = IngestDocumentsInputSchema.safeParse(payload)
+      if (!result.success) {
+        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      }
+      // FASTAPI CALL PLACEHOLDER
+      return NextResponse.json({
+        action,
+        status: 'stub',
+        message: 'Documents ingested (stub) — Supabase Storage + embedding pipeline pending',
+      })
+    }
+
+    case 'extract_rules': {
+      const result = ExtractRulesInputSchema.safeParse(payload)
+      if (!result.success) {
+        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      }
+      // FASTAPI CALL PLACEHOLDER
+      // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
+      return NextResponse.json({
+        action,
+        status: 'stub',
+        rules: [],
+        message: 'Rule extraction (stub) — LangGraph agent pending',
+      })
+    }
+
+    case 'sync_speckle_model': {
+      const result = SyncSpeckleModelInputSchema.safeParse(payload)
+      if (!result.success) {
+        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      }
+      // FASTAPI CALL PLACEHOLDER
+      // SPECKLE VIEWER WILL BE MOUNTED HERE
+      return NextResponse.json({
+        action,
+        status: 'stub',
+        message: 'Speckle model synced (stub) — Speckle geometry extraction pending',
+      })
+    }
+
+    case 'evaluate_compliance': {
+      const result = EvaluateComplianceInputSchema.safeParse(payload)
+      if (!result.success) {
+        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      }
+      // FASTAPI CALL PLACEHOLDER
+      // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
+      return NextResponse.json({
+        action,
+        status: 'stub',
+        issues: [],
+        readinessScore: null,
+        message: 'Compliance evaluation (stub) — rule engine + LangGraph agent pending',
+      })
+    }
+
+    default:
+      return NextResponse.json({ error: `Unknown precheck action: ${action}` }, { status: 400 })
+  }
+}
+
+function handlePrecheckGet(request: NextRequest): NextResponse {
+  const { searchParams } = new URL(request.url)
+  const runId = searchParams.get('runId')
+  const projectId = searchParams.get('projectId')
+
+  if (runId) {
+    // FASTAPI CALL PLACEHOLDER — GET /precheck/runs/:runId
+    return NextResponse.json({
+      run: null,
+      siteContext: null,
+      modelRef: null,
+      geometrySnapshot: null,
+      issues: [],
+      checklist: [],
+      status: 'stub',
+      message: `Run details for ${runId} (stub) — FastAPI integration pending`,
+    })
+  }
+
+  if (projectId) {
+    // FASTAPI CALL PLACEHOLDER — GET /precheck/runs?projectId=
+    return NextResponse.json({
+      runs: [],
+      status: 'stub',
+      message: `Project runs for ${projectId} (stub) — FastAPI integration pending`,
+    })
+  }
+
+  return NextResponse.json({
+    tool: 'precheck',
+    status: 'placeholder',
+    message: 'Precheck tool endpoint active — provide ?runId= or ?projectId= for data',
   })
 }

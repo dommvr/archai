@@ -19,6 +19,16 @@
  */
 
 import type { ToolResult } from '@/types'
+import type {
+  CreatePrecheckRunInput,
+  IngestSiteInput,
+  IngestDocumentsInput,
+  ExtractRulesInput,
+  SyncSpeckleModelInput,
+  EvaluateComplianceInput,
+  GetRunDetailsResponse,
+  PrecheckRun,
+} from '@/lib/precheck/types'
 
 type ToolPayload = Record<string, unknown>
 
@@ -217,6 +227,113 @@ export async function runExportSync(projectId: string, format: 'ifc' | 'revit' |
     status: 'ok',
     data: null,
     message: `Export (${format}) stub — not yet implemented`,
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool 1: Smart Zoning & Code Checker — typed precheck action wrappers
+// READY FOR TOOL 1 INTEGRATION HERE
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function createPrecheckRun(
+  input: CreatePrecheckRunInput
+): Promise<ToolResult<{ runId: string; status: string }>> {
+  console.log('→ Calling FastAPI /precheck/runs [create_run]', input)
+  // FASTAPI CALL PLACEHOLDER
+  // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
+  await simulateDelay(300)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: { runId: crypto.randomUUID(), status: 'created' },
+    message: 'Precheck run created (stub)',
+  }
+}
+
+export async function ingestSiteContext(input: IngestSiteInput): Promise<ToolResult> {
+  console.log('→ Calling FastAPI /precheck/ingest-site', input)
+  // FASTAPI CALL PLACEHOLDER
+  await simulateDelay(500)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: null,
+    message: 'Site context ingested (stub)',
+  }
+}
+
+export async function ingestPrecheckDocuments(input: IngestDocumentsInput): Promise<ToolResult> {
+  console.log('→ Calling FastAPI /precheck/ingest-documents', input)
+  // FASTAPI CALL PLACEHOLDER
+  await simulateDelay(500)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: null,
+    message: 'Documents ingested (stub)',
+  }
+}
+
+export async function extractPrecheckRules(input: ExtractRulesInput): Promise<ToolResult> {
+  console.log('→ Calling FastAPI /precheck/extract-rules', input)
+  // FASTAPI CALL PLACEHOLDER
+  // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
+  await simulateDelay(1000)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: null,
+    message: 'Rules extracted (stub)',
+  }
+}
+
+export async function syncPrecheckSpeckleModel(input: SyncSpeckleModelInput): Promise<ToolResult> {
+  console.log('→ Calling FastAPI /precheck/sync-speckle-model', input)
+  // FASTAPI CALL PLACEHOLDER
+  // SPECKLE EXPORT PLACEHOLDER
+  await simulateDelay(800)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: null,
+    message: 'Speckle model synced (stub)',
+  }
+}
+
+export async function evaluatePrecheckCompliance(input: EvaluateComplianceInput): Promise<ToolResult> {
+  console.log('→ Calling FastAPI /precheck/evaluate-compliance', input)
+  // FASTAPI CALL PLACEHOLDER
+  // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
+  await simulateDelay(1200)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: null,
+    message: 'Compliance evaluated (stub)',
+  }
+}
+
+export async function getPrecheckRunDetails(runId: string): Promise<ToolResult<GetRunDetailsResponse>> {
+  console.log(`→ Calling FastAPI /precheck/runs/${runId}`)
+  // FASTAPI CALL PLACEHOLDER
+  await simulateDelay(400)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: null,
+    message: 'Run details fetched (stub)',
+  }
+}
+
+export async function listProjectPrecheckRuns(projectId: string): Promise<ToolResult<PrecheckRun[]>> {
+  console.log(`→ Calling FastAPI /precheck/runs?projectId=${projectId}`)
+  // FASTAPI CALL PLACEHOLDER
+  await simulateDelay(400)
+  return {
+    toolId: 'site-analysis',
+    status: 'ok',
+    data: [],
+    message: 'Project runs listed (stub)',
   }
 }
 
