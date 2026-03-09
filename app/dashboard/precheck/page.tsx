@@ -8,6 +8,14 @@ export default async function PrecheckPage() {
 
   if (!user) redirect('/')
 
+  const { data: project } = await supabase
+    .from('projects')
+    .select('id')
+    .eq('user_id', user.id)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
   return (
     <PrecheckWorkspace
       user={{
@@ -15,6 +23,7 @@ export default async function PrecheckPage() {
         email:         user.email         ?? undefined,
         user_metadata: user.user_metadata ?? undefined,
       }}
+      projectId={project?.id ?? null}
     />
   )
 }

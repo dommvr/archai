@@ -114,6 +114,7 @@ async def get_run_details(
         if run.speckle_model_ref_id else None
     )
     snapshot  = await repo.get_latest_geometry_snapshot(run_id)
+    rules     = await repo.get_rules_for_run(run_id)
     issues    = await repo.get_issues_for_run(run_id)
     checklist = await repo.get_checklist_for_run(run_id)
 
@@ -122,6 +123,7 @@ async def get_run_details(
         site_context=site_context,
         model_ref=model_ref,
         geometry_snapshot=snapshot,
+        rules=rules,
         issues=issues,
         checklist=checklist,
     )

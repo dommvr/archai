@@ -537,7 +537,9 @@ create table public.compliance_checks (
   -- Maps to: ComplianceCheckSchema.metricKey
   metric_key     public.metric_key          not null,
 
-  -- Pass/fail/ambiguous/not_applicable/missing_input
+  -- Pass/fail/ambiguous/missing_input in the V1 engine flow.
+  -- not_applicable remains a reserved enum value for future audit/reporting paths;
+  -- current evaluation filters non-applicable rules before checks are written.
   -- Maps to: ComplianceCheckSchema.status (CHECK_RESULT_STATUSES)
   status         public.check_result_status not null,
 
@@ -573,6 +575,7 @@ create index idx_compliance_checks_status   on public.compliance_checks(run_id, 
 --     Maps to: ComplianceIssueSchema
 --     Presentation layer on top of compliance_checks.
 --     Written by ComplianceEngineServiceContract.generateIssues()
+--     V1 persists only actionable issues (fail / ambiguous / missing_input).
 --     Consumed by PrecheckWorkspace → ComplianceIssuesTable / ComplianceIssueDrawer
 -- ════════════════════════════════════════════════════════════
 

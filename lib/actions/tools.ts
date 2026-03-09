@@ -18,7 +18,9 @@
  * Remove the placeholder comments when implementing real logic.
  */
 
+import { headers } from 'next/headers'
 import type { ToolResult } from '@/types'
+import { GetRunDetailsResponseSchema, PrecheckRunSchema, ProjectRunsResponseSchema } from '@/lib/precheck/schemas'
 import type {
   CreatePrecheckRunInput,
   IngestSiteInput,
@@ -237,103 +239,81 @@ export async function runExportSync(projectId: string, format: 'ifc' | 'revit' |
 
 export async function createPrecheckRun(
   input: CreatePrecheckRunInput
-): Promise<ToolResult<{ runId: string; status: string }>> {
-  console.log('→ Calling FastAPI /precheck/runs [create_run]', input)
-  // FASTAPI CALL PLACEHOLDER
-  // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-  await simulateDelay(300)
+): Promise<ToolResult<PrecheckRun>> {
+  const data = PrecheckRunSchema.parse(
+    await callPrecheckRoute('POST', { action: 'create_run', payload: input })
+  )
   return {
     toolId: 'site-analysis',
     status: 'ok',
-    data: { runId: crypto.randomUUID(), status: 'created' },
-    message: 'Precheck run created (stub)',
+    data,
   }
 }
 
 export async function ingestSiteContext(input: IngestSiteInput): Promise<ToolResult> {
-  console.log('→ Calling FastAPI /precheck/ingest-site', input)
-  // FASTAPI CALL PLACEHOLDER
-  await simulateDelay(500)
+  await callPrecheckRoute('POST', { action: 'ingest_site', payload: input })
   return {
     toolId: 'site-analysis',
     status: 'ok',
     data: null,
-    message: 'Site context ingested (stub)',
   }
 }
 
 export async function ingestPrecheckDocuments(input: IngestDocumentsInput): Promise<ToolResult> {
-  console.log('→ Calling FastAPI /precheck/ingest-documents', input)
-  // FASTAPI CALL PLACEHOLDER
-  await simulateDelay(500)
+  await callPrecheckRoute('POST', { action: 'ingest_documents', payload: input })
   return {
     toolId: 'site-analysis',
     status: 'ok',
     data: null,
-    message: 'Documents ingested (stub)',
   }
 }
 
 export async function extractPrecheckRules(input: ExtractRulesInput): Promise<ToolResult> {
-  console.log('→ Calling FastAPI /precheck/extract-rules', input)
-  // FASTAPI CALL PLACEHOLDER
-  // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-  await simulateDelay(1000)
+  await callPrecheckRoute('POST', { action: 'extract_rules', payload: input })
   return {
     toolId: 'site-analysis',
     status: 'ok',
     data: null,
-    message: 'Rules extracted (stub)',
   }
 }
 
 export async function syncPrecheckSpeckleModel(input: SyncSpeckleModelInput): Promise<ToolResult> {
-  console.log('→ Calling FastAPI /precheck/sync-speckle-model', input)
-  // FASTAPI CALL PLACEHOLDER
-  // SPECKLE EXPORT PLACEHOLDER
-  await simulateDelay(800)
+  await callPrecheckRoute('POST', { action: 'sync_speckle_model', payload: input })
   return {
     toolId: 'site-analysis',
     status: 'ok',
     data: null,
-    message: 'Speckle model synced (stub)',
   }
 }
 
 export async function evaluatePrecheckCompliance(input: EvaluateComplianceInput): Promise<ToolResult> {
-  console.log('→ Calling FastAPI /precheck/evaluate-compliance', input)
-  // FASTAPI CALL PLACEHOLDER
-  // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-  await simulateDelay(1200)
+  await callPrecheckRoute('POST', { action: 'evaluate_compliance', payload: input })
   return {
     toolId: 'site-analysis',
     status: 'ok',
     data: null,
-    message: 'Compliance evaluated (stub)',
   }
 }
 
 export async function getPrecheckRunDetails(runId: string): Promise<ToolResult<GetRunDetailsResponse>> {
-  console.log(`→ Calling FastAPI /precheck/runs/${runId}`)
-  // FASTAPI CALL PLACEHOLDER
-  await simulateDelay(400)
+  const data = GetRunDetailsResponseSchema.parse(
+    await callPrecheckRoute('GET', undefined, `?runId=${encodeURIComponent(runId)}`)
+  )
   return {
     toolId: 'site-analysis',
     status: 'ok',
-    data: null,
-    message: 'Run details fetched (stub)',
+    data,
   }
 }
 
 export async function listProjectPrecheckRuns(projectId: string): Promise<ToolResult<PrecheckRun[]>> {
-  console.log(`→ Calling FastAPI /precheck/runs?projectId=${projectId}`)
-  // FASTAPI CALL PLACEHOLDER
-  await simulateDelay(400)
+  const data = ProjectRunsResponseSchema.parse(
+    await callPrecheckRoute('GET', undefined, `?projectId=${encodeURIComponent(projectId)}`)
+  )
   return {
     toolId: 'site-analysis',
     status: 'ok',
-    data: [],
-    message: 'Project runs listed (stub)',
+    data: data.runs,
   }
 }
 
@@ -343,4 +323,31 @@ export async function listProjectPrecheckRuns(projectId: string): Promise<ToolRe
 // ─────────────────────────────────────────────────────────────────────────────
 function simulateDelay(ms = 800): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function callPrecheckRoute(
+  method: 'GET' | 'POST',
+  body?: Record<string, unknown>,
+  search = ''
+) {
+  const requestHeaders = await headers()
+  const host = requestHeaders.get('x-forwarded-host') ?? requestHeaders.get('host')
+  const protocol = requestHeaders.get('x-forwarded-proto') ?? 'http'
+
+  if (!host) {
+    throw new Error('Missing host header for precheck route')
+  }
+
+  const response = await fetch(`${protocol}://${host}/api/agents/precheck${search}`, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+    cache: 'no-store',
+  })
+
+  if (!response.ok) {
+    throw new Error(await response.text())
+  }
+
+  return response.json()
 }

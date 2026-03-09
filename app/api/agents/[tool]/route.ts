@@ -1,176 +1,142 @@
 import { NextRequest, NextResponse } from 'next/server'
+import type { ZodType } from 'zod'
 import { getSupabaseServerClient } from '@/lib/supabase/server'
 import type { ToolId } from '@/types'
 import {
   CreatePrecheckRunInputSchema,
-  IngestSiteInputSchema,
-  IngestDocumentsInputSchema,
-  ExtractRulesInputSchema,
-  SyncSpeckleModelInputSchema,
   EvaluateComplianceInputSchema,
+  ExtractRulesInputSchema,
+  IngestDocumentsInputSchema,
+  IngestSiteInputSchema,
+  SyncSpeckleModelInputSchema,
 } from '@/lib/precheck/schemas'
 
-/**
- * Dynamic API route handler for all AI tool endpoints.
- * Path: /api/agents/[tool]
- *
- * All calls are auth-gated — returns 401 if no valid session.
- * Currently returns placeholder responses with console logging.
- *
- * Future integration:
- * - Replace the stub responses with fetch() calls to FastAPI
- * - Pass the Supabase JWT in Authorization: Bearer header to FastAPI
- * - FastAPI verifies JWT using the Supabase JWT secret
- * - Stream responses using SSE for long-running LangGraph agent runs
- *
- * FASTAPI CALL PLACEHOLDER
- * LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
- *
- * NOTE: In Next.js 15+, `params` is a Promise — must be awaited.
- */
+type PrecheckAction =
+  | 'create_run'
+  | 'ingest_site'
+  | 'ingest_documents'
+  | 'extract_rules'
+  | 'sync_speckle_model'
+  | 'evaluate_compliance'
+
+type PrecheckPayload = Record<string, unknown>
+
+const TOOL_STUBS: Partial<Record<ToolId | string, object>> = {
+  'site-analysis': {
+    analysis: null,
+    violations: [],
+    status: 'stub',
+    message: 'Site analysis not yet implemented — FastAPI integration pending',
+  },
+  'massing-generator': {
+    model: null,
+    options: [],
+    status: 'stub',
+    message: 'Massing generator not yet implemented — FastAPI integration pending',
+  },
+  'space-planner': {
+    layout: null,
+    rooms: [],
+    status: 'stub',
+    message: 'Space planner not yet implemented — FastAPI integration pending',
+  },
+  'live-metrics': {
+    gfa: 4250,
+    carbon: 312000,
+    efficiency: 78,
+    codeRisk: 'low',
+    status: 'stub',
+    message: 'Returning demo values — FastAPI integration pending',
+  },
+  'option-comparison': {
+    options: [],
+    comparison: null,
+    status: 'stub',
+    message: 'Option comparison not yet implemented — FastAPI integration pending',
+  },
+  'sustainability-copilot': {
+    carbonBreakdown: null,
+    solarAnalysis: null,
+    status: 'stub',
+    message: 'Sustainability copilot not yet implemented — Ladybug integration pending',
+  },
+  'firm-knowledge': {
+    results: [],
+    citations: [],
+    status: 'stub',
+    message: 'Firm knowledge RAG not yet implemented — pgvector integration pending',
+  },
+  'brief-translator': {
+    program: null,
+    rooms: [],
+    status: 'stub',
+    message: 'Brief translator not yet implemented — LangGraph agent pending',
+  },
+  'spec-writer': {
+    specification: null,
+    sections: [],
+    status: 'stub',
+    message: 'Spec writer not yet implemented — LangGraph agent pending',
+  },
+  'sketch-to-bim': {
+    elements: [],
+    status: 'stub',
+    message: 'Sketch-to-BIM not yet implemented — Replicate vision model pending',
+  },
+  'export-sync': {
+    exportUrl: null,
+    status: 'stub',
+    message: 'Export sync not yet implemented — Speckle export integration pending',
+  },
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ tool: string }> }
 ) {
-  // Auth check — CRITICAL: always use getUser(), not getSession()
-  const supabase = await getSupabaseServerClient()
-  const { data: { user }, error } = await supabase.auth.getUser()
-
-  if (!user || error) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const auth = await authenticateRequest(request)
+  if (auth instanceof NextResponse) {
+    return auth
   }
 
   const { tool } = await params
   let body: Record<string, unknown> = {}
+
   try {
     body = await request.json()
   } catch {
-    // Empty body is acceptable for some tool calls
+    body = {}
   }
 
-  console.log(`→ Calling FastAPI /${tool}`, { userId: user.id, tool, body })
-
-  // ── Precheck: action-based dispatch ─────────────────────────────────────────
   if (tool === 'precheck') {
-    return handlePrecheckPost(body)
-  }
-
-  // Tool-specific placeholder responses
-  // FASTAPI CALL PLACEHOLDER — replace each case with:
-  // const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/${tool}`, {
-  //   method: 'POST',
-  //   headers: {
-  //     'Content-Type': 'application/json',
-  //     'Authorization': `Bearer ${session.access_token}`,
-  //   },
-  //   body: JSON.stringify(body),
-  // })
-  // return NextResponse.json(await res.json(), { status: res.status })
-
-  const TOOL_STUBS: Partial<Record<ToolId | string, object>> = {
-    'site-analysis': {
-      analysis: null,
-      violations: [],
-      status: 'stub',
-      message: 'Site analysis not yet implemented — FastAPI integration pending',
-    },
-    'massing-generator': {
-      model: null,
-      options: [],
-      status: 'stub',
-      message: 'Massing generator not yet implemented — FastAPI integration pending',
-    },
-    'space-planner': {
-      layout: null,
-      rooms: [],
-      status: 'stub',
-      message: 'Space planner not yet implemented — FastAPI integration pending',
-    },
-    'live-metrics': {
-      gfa: 4250,
-      carbon: 312000,
-      efficiency: 78,
-      codeRisk: 'low',
-      status: 'stub',
-      message: 'Returning demo values — FastAPI integration pending',
-    },
-    'option-comparison': {
-      options: [],
-      comparison: null,
-      status: 'stub',
-      message: 'Option comparison not yet implemented — FastAPI integration pending',
-    },
-    'sustainability-copilot': {
-      carbonBreakdown: null,
-      solarAnalysis: null,
-      status: 'stub',
-      message: 'Sustainability copilot not yet implemented — Ladybug integration pending',
-    },
-    'firm-knowledge': {
-      results: [],
-      citations: [],
-      status: 'stub',
-      message: 'Firm knowledge RAG not yet implemented — pgvector integration pending',
-    },
-    'brief-translator': {
-      program: null,
-      rooms: [],
-      status: 'stub',
-      message: 'Brief translator not yet implemented — LangGraph agent pending',
-    },
-    'spec-writer': {
-      specification: null,
-      sections: [],
-      status: 'stub',
-      message: 'Spec writer not yet implemented — LangGraph agent pending',
-    },
-    'sketch-to-bim': {
-      elements: [],
-      status: 'stub',
-      message: 'Sketch-to-BIM not yet implemented — Replicate vision model pending',
-    },
-    'export-sync': {
-      exportUrl: null,
-      status: 'stub',
-      message: 'Export sync not yet implemented — Speckle export integration pending',
-    },
+    return handlePrecheckPost(body, auth.accessToken)
   }
 
   const toolData = TOOL_STUBS[tool as ToolId]
-
   if (!toolData) {
-    return NextResponse.json(
-      { error: `Unknown tool: ${tool}` },
-      { status: 404 }
-    )
+    return NextResponse.json({ error: `Unknown tool: ${tool}` }, { status: 404 })
   }
 
   return NextResponse.json({
     tool,
-    userId: user.id,
+    userId: auth.userId,
     timestamp: new Date().toISOString(),
     ...toolData,
   })
 }
 
-/**
- * GET handler — returns tool metadata/status, or precheck run details if ?runId= is provided.
- */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ tool: string }> }
 ) {
-  const supabase = await getSupabaseServerClient()
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const auth = await authenticateRequest(request)
+  if (auth instanceof NextResponse) {
+    return auth
   }
 
   const { tool } = await params
-
   if (tool === 'precheck') {
-    return handlePrecheckGet(request)
+    return handlePrecheckGet(request, auth.accessToken)
   }
 
   return NextResponse.json({
@@ -181,103 +147,107 @@ export async function GET(
   })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Precheck handlers
-// FASTAPI CALL PLACEHOLDER — each action will proxy to FastAPI /precheck/*
-// LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-// ─────────────────────────────────────────────────────────────────────────────
-
-function handlePrecheckPost(body: Record<string, unknown>): NextResponse {
+async function handlePrecheckPost(
+  body: Record<string, unknown>,
+  accessToken: string
+) {
   const action = body.action
-  const payload = body.payload as Record<string, unknown> | undefined
+  const payload = (body.payload ?? {}) as PrecheckPayload
 
   if (typeof action !== 'string') {
     return NextResponse.json({ error: 'Missing action field' }, { status: 400 })
   }
 
-  switch (action) {
+  switch (action as PrecheckAction) {
     case 'create_run': {
-      const result = CreatePrecheckRunInputSchema.safeParse(payload)
-      if (!result.success) {
-        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      const parsed = validatePayload(CreatePrecheckRunInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
       }
-      // FASTAPI CALL PLACEHOLDER
-      return NextResponse.json({
-        action,
-        status: 'stub',
-        runId: crypto.randomUUID(),
-        message: 'Precheck run created (stub) — FastAPI integration pending',
+
+      return proxyFastApi({
+        accessToken,
+        path: '/precheck/runs',
+        method: 'POST',
+        body: { projectId: parsed.projectId },
       })
     }
 
     case 'ingest_site': {
-      const result = IngestSiteInputSchema.safeParse(payload)
-      if (!result.success) {
-        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      const parsed = validatePayload(IngestSiteInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
       }
-      // FASTAPI CALL PLACEHOLDER
-      return NextResponse.json({
-        action,
-        status: 'stub',
-        message: 'Site context ingested (stub) — site data provider integration pending',
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/ingest-site`,
+        method: 'POST',
+        body: {
+          address: parsed.address,
+          centroid: parsed.centroid,
+          parcelBoundary: parsed.parcelBoundary,
+          manualOverrides: parsed.manualOverrides,
+        },
       })
     }
 
     case 'ingest_documents': {
-      const result = IngestDocumentsInputSchema.safeParse(payload)
-      if (!result.success) {
-        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      const parsed = validatePayload(IngestDocumentsInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
       }
-      // FASTAPI CALL PLACEHOLDER
-      return NextResponse.json({
-        action,
-        status: 'stub',
-        message: 'Documents ingested (stub) — Supabase Storage + embedding pipeline pending',
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/ingest-documents`,
+        method: 'POST',
+        body: { documentIds: parsed.documentIds },
       })
     }
 
     case 'extract_rules': {
-      const result = ExtractRulesInputSchema.safeParse(payload)
-      if (!result.success) {
-        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      const parsed = validatePayload(ExtractRulesInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
       }
-      // FASTAPI CALL PLACEHOLDER
-      // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-      return NextResponse.json({
-        action,
-        status: 'stub',
-        rules: [],
-        message: 'Rule extraction (stub) — LangGraph agent pending',
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/extract-rules`,
+        method: 'POST',
       })
     }
 
     case 'sync_speckle_model': {
-      const result = SyncSpeckleModelInputSchema.safeParse(payload)
-      if (!result.success) {
-        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      const parsed = validatePayload(SyncSpeckleModelInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
       }
-      // FASTAPI CALL PLACEHOLDER
-      // SPECKLE VIEWER WILL BE MOUNTED HERE
-      return NextResponse.json({
-        action,
-        status: 'stub',
-        message: 'Speckle model synced (stub) — Speckle geometry extraction pending',
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/sync-speckle-model`,
+        method: 'POST',
+        body: {
+          streamId: parsed.streamId,
+          versionId: parsed.versionId,
+          branchName: parsed.branchName,
+          modelName: parsed.modelName,
+        },
       })
     }
 
     case 'evaluate_compliance': {
-      const result = EvaluateComplianceInputSchema.safeParse(payload)
-      if (!result.success) {
-        return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+      const parsed = validatePayload(EvaluateComplianceInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
       }
-      // FASTAPI CALL PLACEHOLDER
-      // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-      return NextResponse.json({
-        action,
-        status: 'stub',
-        issues: [],
-        readinessScore: null,
-        message: 'Compliance evaluation (stub) — rule engine + LangGraph agent pending',
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/evaluate`,
+        method: 'POST',
       })
     }
 
@@ -286,31 +256,24 @@ function handlePrecheckPost(body: Record<string, unknown>): NextResponse {
   }
 }
 
-function handlePrecheckGet(request: NextRequest): NextResponse {
+async function handlePrecheckGet(request: NextRequest, accessToken: string) {
   const { searchParams } = new URL(request.url)
   const runId = searchParams.get('runId')
   const projectId = searchParams.get('projectId')
 
   if (runId) {
-    // FASTAPI CALL PLACEHOLDER — GET /precheck/runs/:runId
-    return NextResponse.json({
-      run: null,
-      siteContext: null,
-      modelRef: null,
-      geometrySnapshot: null,
-      issues: [],
-      checklist: [],
-      status: 'stub',
-      message: `Run details for ${runId} (stub) — FastAPI integration pending`,
+    return proxyFastApi({
+      accessToken,
+      path: `/precheck/runs/${runId}`,
+      method: 'GET',
     })
   }
 
   if (projectId) {
-    // FASTAPI CALL PLACEHOLDER — GET /precheck/runs?projectId=
-    return NextResponse.json({
-      runs: [],
-      status: 'stub',
-      message: `Project runs for ${projectId} (stub) — FastAPI integration pending`,
+    return proxyFastApi({
+      accessToken,
+      path: `/projects/${projectId}/precheck-runs`,
+      method: 'GET',
     })
   }
 
@@ -319,4 +282,146 @@ function handlePrecheckGet(request: NextRequest): NextResponse {
     status: 'placeholder',
     message: 'Precheck tool endpoint active — provide ?runId= or ?projectId= for data',
   })
+}
+
+async function authenticateRequest(request: NextRequest) {
+  const supabase = await getSupabaseServerClient()
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser()
+
+  if (!user || error) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const accessToken = extractAccessToken(request)
+  if (!accessToken) {
+    return NextResponse.json({ error: 'Missing access token' }, { status: 401 })
+  }
+
+  return { userId: user.id, accessToken }
+}
+
+function validatePayload<T>(
+  schema: ZodType<T>,
+  payload: PrecheckPayload
+): T | NextResponse {
+  const result = schema.safeParse(payload)
+  if (!result.success) {
+    return NextResponse.json({ error: result.error.flatten() }, { status: 422 })
+  }
+
+  return result.data
+}
+
+async function proxyFastApi(input: {
+  accessToken: string
+  path: string
+  method: 'GET' | 'POST'
+  body?: unknown
+}) {
+  const baseUrl = getFastApiBaseUrl()
+  if (!baseUrl) {
+    return NextResponse.json(
+      { error: 'FastAPI backend URL is not configured' },
+      { status: 500 }
+    )
+  }
+
+  const response = await fetch(`${baseUrl}${input.path}`, {
+    method: input.method,
+    headers: {
+      'Authorization': `Bearer ${input.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: input.body === undefined ? undefined : JSON.stringify(input.body),
+    cache: 'no-store',
+  })
+
+  const text = await response.text()
+  const contentType = response.headers.get('content-type') ?? 'application/json'
+
+  if (contentType.includes('application/json')) {
+    const data = text ? JSON.parse(text) : null
+    return NextResponse.json(data, { status: response.status })
+  }
+
+  return new NextResponse(text, {
+    status: response.status,
+    headers: { 'Content-Type': contentType },
+  })
+}
+
+function getFastApiBaseUrl() {
+  return process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') ?? process.env.API_URL?.replace(/\/$/, '') ?? null
+}
+
+function extractAccessToken(request: NextRequest) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  if (!supabaseUrl) {
+    return null
+  }
+
+  let hostname: string
+  try {
+    hostname = new URL(supabaseUrl).hostname.split('.')[0] ?? ''
+  } catch {
+    return null
+  }
+
+  const storageKey = `sb-${hostname}-auth-token`
+  const cookieValue = combineCookieChunks(request, storageKey)
+  if (!cookieValue) {
+    return null
+  }
+
+  const decoded = cookieValue.startsWith('base64-')
+    ? decodeBase64Url(cookieValue.slice('base64-'.length))
+    : cookieValue
+
+  try {
+    const parsed = JSON.parse(decoded) as
+      | { access_token?: string; session?: { access_token?: string } }
+      | null
+
+    return parsed?.access_token ?? parsed?.session?.access_token ?? null
+  } catch {
+    return null
+  }
+}
+
+function combineCookieChunks(request: NextRequest, storageKey: string) {
+  const allCookies = request.cookies.getAll()
+  const direct = allCookies.find((cookie) => cookie.name === storageKey)?.value
+  if (direct) {
+    return direct
+  }
+
+  const chunkValues = allCookies
+    .filter((cookie) => cookie.name === storageKey || cookie.name.startsWith(`${storageKey}.`))
+    .sort((left, right) => getChunkIndex(left.name, storageKey) - getChunkIndex(right.name, storageKey))
+    .map((cookie) => cookie.value)
+
+  if (chunkValues.length === 0) {
+    return null
+  }
+
+  return chunkValues.join('')
+}
+
+function getChunkIndex(name: string, storageKey: string) {
+  if (name === storageKey) {
+    return -1
+  }
+
+  const suffix = name.slice(storageKey.length + 1)
+  const parsed = Number.parseInt(suffix, 10)
+  return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed
+}
+
+function decodeBase64Url(value: string) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+  const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4))
+  return Buffer.from(`${normalized}${padding}`, 'base64').toString('utf8')
 }

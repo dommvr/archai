@@ -359,6 +359,7 @@ class GetRunDetailsResponse(BaseSchema):
     site_context: SiteContext | None = None
     model_ref: SpeckleModelRef | None = None
     geometry_snapshot: GeometrySnapshot | None = None
+    rules: list[ExtractedRule] = Field(default_factory=list)
     issues: list[ComplianceIssue] = Field(default_factory=list)
     checklist: list[PermitChecklistItem] = Field(default_factory=list)
 

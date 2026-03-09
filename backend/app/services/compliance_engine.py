@@ -148,7 +148,13 @@ class ComplianceEngineService:
     ) -> list[ComplianceIssue]:
         """
         Converts non-passing ComplianceChecks into ComplianceIssue presentation objects.
-        Passing checks (status=pass) produce an INFO issue for the report trail.
+        V1 persists only actionable issues produced by deterministic evaluation:
+          - fail
+          - ambiguous
+          - missing_input
+
+        Rules that are not applicable are filtered before evaluation, so the engine
+        does not emit not_applicable issues in this flow.
 
         Explanation fields are left empty in V1.
         TODO: Run each failing issue through an LLM to generate a plain-English
@@ -159,6 +165,8 @@ class ComplianceEngineService:
         issue_rows: list[dict[str, Any]] = []
 
         for check in checks:
+            if not _should_persist_issue(check.status):
+                continue
             rule = rules_by_id.get(check.rule_id)
             issue = _check_to_issue(run_id=run_id, check=check, rule=rule, now=now)
             issue_rows.append(_issue_to_row(issue))
@@ -401,14 +409,9 @@ def _check_to_issue(
     title   = rule.title if rule else f"Rule check: {check.metric_key.value}"
     metric  = check.metric_key
 
-    if check.status == CheckResultStatus.PASS:
-        severity    = IssueSeverity.INFO
-        summary     = f"{metric.value.replace('_', ' ').title()} is within the allowed limit."
-        explanation = None
-
-    elif check.status == CheckResultStatus.FAIL:
+    if check.status == CheckResultStatus.FAIL:
         severity    = _FAIL_SEVERITY_BY_METRIC.get(metric, IssueSeverity.ERROR)
-        summary     = _fail_summary(check)
+        summary     = _fail_summary(check, rule)
         explanation = None  # TODO: LLM explanation — see generate_issues() docstring
 
     elif check.status == CheckResultStatus.MISSING_INPUT:
@@ -421,10 +424,8 @@ def _check_to_issue(
         summary     = f"Rule for '{metric.value}' has low confidence and needs human review."
         explanation = "Mark this rule as 'reviewed' in the Rules panel to include it in evaluation."
 
-    else:  # not_applicable
-        severity    = IssueSeverity.INFO
-        summary     = f"Rule for '{metric.value}' is not applicable to this project."
-        explanation = None
+    else:
+        raise ValueError(f"Unsupported issue status for persisted issues: {check.status.value}")
 
     return ComplianceIssue(
         id=uuid4(),
@@ -449,21 +450,36 @@ def _check_to_issue(
     )
 
 
-def _fail_summary(check: ComplianceCheck) -> str:
+def _fail_summary(check: ComplianceCheck, rule: ExtractedRule | None) -> str:
     metric = check.metric_key.value.replace("_", " ").title()
     actual = check.actual_value
+    units = f" {check.units}" if check.units else ""
 
-    if check.expected_value is not None:
-        op = "exceeds the maximum" if check.status == CheckResultStatus.FAIL else "is below the minimum"
-        return f"{metric} ({actual} {check.units or ''}) {op} of {check.expected_value} {check.units or ''}.".strip()
+    if rule and check.expected_value is not None:
+        if rule.operator in {RuleOperator.LTE, RuleOperator.LT}:
+            return f"{metric} ({actual}{units}) exceeds the maximum allowed value of {check.expected_value}{units}."
+
+        if rule.operator in {RuleOperator.GTE, RuleOperator.GT}:
+            return f"{metric} ({actual}{units}) is below the minimum required value of {check.expected_value}{units}."
+
+        if rule.operator == RuleOperator.EQ:
+            return f"{metric} ({actual}{units}) does not match the required value of {check.expected_value}{units}."
 
     if check.expected_min is not None and check.expected_max is not None:
         return (
-            f"{metric} ({actual} {check.units or ''}) falls outside "
-            f"the required range {check.expected_min}–{check.expected_max} {check.units or ''}.".strip()
+            f"{metric} ({actual}{units}) falls outside the required range "
+            f"{check.expected_min}–{check.expected_max}{units}."
         )
 
     return f"{metric} failed compliance check."
+
+
+def _should_persist_issue(status: CheckResultStatus) -> bool:
+    return status in {
+        CheckResultStatus.FAIL,
+        CheckResultStatus.AMBIGUOUS,
+        CheckResultStatus.MISSING_INPUT,
+    }
 
 
 # ════════════════════════════════════════════════════════════

@@ -17,40 +17,66 @@ import type {
 } from '@/lib/precheck/types'
 import type { AuthUser } from '@/types'
 
-import { PrecheckRunsList }          from './PrecheckRunsList'
-import { CreatePrecheckRunDialog }   from './CreatePrecheckRunDialog'
-import { SiteContextForm }           from './SiteContextForm'
-import { DocumentUploadPanel }       from './DocumentUploadPanel'
-import { RuleExtractionStatusCard }  from './RuleExtractionStatusCard'
-import { SpeckleModelPicker }        from './SpeckleModelPicker'
-import { PrecheckProgressCard }      from './PrecheckProgressCard'
-import { ReadinessScoreCard }        from './ReadinessScoreCard'
-import { ComplianceIssuesTable }     from './ComplianceIssuesTable'
-import { ComplianceIssueDrawer }     from './ComplianceIssueDrawer'
-import { PermitChecklistCard }       from './PermitChecklistCard'
-import { PrecheckViewerPanel }       from './PrecheckViewerPanel'
+import { PrecheckRunsList } from './PrecheckRunsList'
+import { CreatePrecheckRunDialog } from './CreatePrecheckRunDialog'
+import { SiteContextForm } from './SiteContextForm'
+import { DocumentUploadPanel } from './DocumentUploadPanel'
+import { RuleExtractionStatusCard } from './RuleExtractionStatusCard'
+import { SpeckleModelPicker } from './SpeckleModelPicker'
+import { PrecheckProgressCard } from './PrecheckProgressCard'
+import { ReadinessScoreCard } from './ReadinessScoreCard'
+import { ComplianceIssuesTable } from './ComplianceIssuesTable'
+import { ComplianceIssueDrawer } from './ComplianceIssueDrawer'
+import { PermitChecklistCard } from './PermitChecklistCard'
+import { PrecheckViewerPanel } from './PrecheckViewerPanel'
 
 type Tab = 'setup' | 'issues' | 'checklist'
 
-// Demo project ID — replace with real project selector when projects feature is built
-const DEMO_PROJECT_ID = '00000000-0000-0000-0000-000000000001'
-
 interface PrecheckWorkspaceProps {
   user: AuthUser
+  projectId: string | null
 }
 
-export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
-  const [runs,           setRuns]           = useState<PrecheckRun[]>([])
-  const [selectedRunId,  setSelectedRunId]  = useState<string | null>(null)
-  const [runDetails,     setRunDetails]     = useState<GetRunDetailsResponse | null>(null)
-  const [selectedIssue,  setSelectedIssue]  = useState<ComplianceIssue | null>(null)
-  const [drawerOpen,     setDrawerOpen]     = useState(false)
-  const [createOpen,     setCreateOpen]     = useState(false)
-  const [activeTab,      setActiveTab]      = useState<Tab>('setup')
+export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
+  const [runs, setRuns] = useState<PrecheckRun[]>([])
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const [runDetails, setRunDetails] = useState<GetRunDetailsResponse | null>(null)
+  const [selectedIssue, setSelectedIssue] = useState<ComplianceIssue | null>(null)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState<Tab>('setup')
+  const [loadingRuns, setLoadingRuns] = useState(false)
   const [loadingDetails, setLoadingDetails] = useState(false)
-  const [extracting,     setExtracting]     = useState(false)
+  const [extracting, setExtracting] = useState(false)
 
-  const projectId = DEMO_PROJECT_ID
+  const fetchProjectRuns = useCallback(async (preferredRunId?: string) => {
+    if (!projectId) {
+      setRuns([])
+      setSelectedRunId(null)
+      return []
+    }
+
+    setLoadingRuns(true)
+    try {
+      const { runs: projectRuns } = await precheckApi.listProjectRuns(projectId)
+      setRuns(projectRuns)
+      setSelectedRunId((current) => {
+        if (preferredRunId && projectRuns.some((run) => run.id === preferredRunId)) {
+          return preferredRunId
+        }
+        if (current && projectRuns.some((run) => run.id === current)) {
+          return current
+        }
+        return projectRuns[0]?.id ?? null
+      })
+      return projectRuns
+    } catch (err) {
+      console.error('[PrecheckWorkspace] Failed to fetch project runs:', err)
+      return []
+    } finally {
+      setLoadingRuns(false)
+    }
+  }, [projectId])
 
   const fetchRunDetails = useCallback(async (runId: string) => {
     setLoadingDetails(true)
@@ -64,46 +90,51 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
     }
   }, [])
 
+  const refreshRunState = useCallback(async (runId: string) => {
+    await Promise.all([
+      fetchProjectRuns(runId),
+      fetchRunDetails(runId),
+    ])
+  }, [fetchProjectRuns, fetchRunDetails])
+
+  useEffect(() => {
+    if (!projectId) {
+      setRuns([])
+      setSelectedRunId(null)
+      setRunDetails(null)
+      return
+    }
+
+    void fetchProjectRuns()
+  }, [projectId, fetchProjectRuns])
+
   useEffect(() => {
     if (selectedRunId) {
       void fetchRunDetails(selectedRunId)
-    } else {
-      setRunDetails(null)
+      return
     }
+
+    setRunDetails(null)
   }, [selectedRunId, fetchRunDetails])
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
-
   async function handleCreateRun(pid: string, uid: string) {
-    await precheckApi.createPrecheckRun({ projectId: pid, createdBy: uid })
-    // FASTAPI CALL PLACEHOLDER — backend returns the persisted run; stub inserts locally
-    const newRun: PrecheckRun = {
-      id:                crypto.randomUUID(),
-      projectId:         pid,
-      status:            'created',
-      createdBy:         uid,
-      createdAt:         new Date().toISOString(),
-      updatedAt:         new Date().toISOString(),
-      siteContextId:     null,
-      speckleModelRefId: null,
-      readinessScore:    null,
-    }
-    setRuns((prev) => [newRun, ...prev])
-    setSelectedRunId(newRun.id)
+    const run = await precheckApi.createPrecheckRun({ projectId: pid, createdBy: uid })
+    await refreshRunState(run.id)
+    setSelectedRunId(run.id)
     setActiveTab('setup')
   }
 
   async function handleIngestSite(input: IngestSiteInput) {
     await precheckApi.ingestSite(input)
-    // FASTAPI CALL PLACEHOLDER
-    if (selectedRunId) void fetchRunDetails(selectedRunId)
+    if (selectedRunId) {
+      await refreshRunState(selectedRunId)
+    }
   }
 
   async function handleIngestDocuments(documentIds: string[]) {
     if (!selectedRunId) return
     await precheckApi.ingestDocuments({ runId: selectedRunId, documentIds })
-    // FASTAPI CALL PLACEHOLDER
-    void fetchRunDetails(selectedRunId)
+    await refreshRunState(selectedRunId)
   }
 
   async function handleExtractRules() {
@@ -112,7 +143,7 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
     try {
       await precheckApi.extractRules({ runId: selectedRunId })
       // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-      void fetchRunDetails(selectedRunId)
+      await refreshRunState(selectedRunId)
     } finally {
       setExtracting(false)
     }
@@ -121,14 +152,16 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
   async function handleSyncModel(input: SyncSpeckleModelInput) {
     await precheckApi.syncSpeckleModel(input)
     // SPECKLE VIEWER WILL BE MOUNTED HERE
-    if (selectedRunId) void fetchRunDetails(selectedRunId)
+    if (selectedRunId) {
+      await refreshRunState(selectedRunId)
+    }
   }
 
   async function handleEvaluate() {
     if (!selectedRunId) return
     await precheckApi.evaluateCompliance({ runId: selectedRunId })
     // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
-    void fetchRunDetails(selectedRunId)
+    await refreshRunState(selectedRunId)
     setActiveTab('issues')
   }
 
@@ -137,56 +170,49 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
     setDrawerOpen(true)
   }
 
-  // ── Derived ────────────────────────────────────────────────────────────────
-
-  const run       = runDetails?.run     ?? null
-  const issues    = runDetails?.issues  ?? []
+  const run = runDetails?.run ?? null
+  const selectedRun = runs.find((candidate) => candidate.id === selectedRunId) ?? null
+  const issues = runDetails?.issues ?? []
   const checklist = runDetails?.checklist ?? []
-  // READY FOR TOOL 1 INTEGRATION HERE — rules will come from run details once backend is wired
-  const rules: ExtractedRule[] = []
+  const rules: ExtractedRule[] = runDetails?.rules ?? []
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
-    { id: 'setup',     label: 'Setup'     },
-    { id: 'issues',    label: 'Issues',   count: issues.length    || undefined },
+    { id: 'setup', label: 'Setup' },
+    { id: 'issues', label: 'Issues', count: issues.length || undefined },
     { id: 'checklist', label: 'Checklist', count: checklist.length || undefined },
   ]
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-
   return (
     <div className="flex h-full">
-      {/* Left: 3D Viewer */}
-      <div className="flex-1 min-w-0 relative">
+      <div className="relative min-w-0 flex-1">
         <PrecheckViewerPanel selectedIssue={selectedIssue} />
       </div>
 
-      {/* Right: Control Panel */}
-      <aside className="w-[360px] shrink-0 bg-archai-charcoal border-l border-archai-graphite flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="shrink-0 px-4 py-3 border-b border-archai-graphite flex items-center justify-between">
+      <aside className="flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-archai-graphite bg-archai-charcoal">
+        <div className="flex shrink-0 items-center justify-between border-b border-archai-graphite px-4 py-3">
           <div>
             <h2 className="text-sm font-semibold text-white">Code Checker</h2>
-            <p className="text-[10px] text-muted-foreground mt-0.5">Smart Zoning &amp; Permit Pre-Check</p>
+            <p className="mt-0.5 text-[10px] text-muted-foreground">Smart Zoning &amp; Permit Pre-Check</p>
           </div>
           <Button
             variant="archai"
             size="sm"
             className="h-7 px-2.5 text-xs"
             onClick={() => setCreateOpen(true)}
+            disabled={!projectId}
           >
-            <Plus className="h-3 w-3 mr-1" />
+            <Plus className="mr-1 h-3 w-3" />
             New Run
           </Button>
         </div>
 
-        {/* Run selector */}
-        <div className="shrink-0 px-4 py-3 border-b border-archai-graphite">
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Runs</p>
+        <div className="shrink-0 border-b border-archai-graphite px-4 py-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Runs</p>
             {selectedRunId && (
               <button
-                onClick={() => void fetchRunDetails(selectedRunId)}
-                className="text-muted-foreground hover:text-white transition-colors"
+                onClick={() => void refreshRunState(selectedRunId)}
+                className="text-muted-foreground transition-colors hover:text-white"
                 aria-label="Refresh run"
               >
                 <RefreshCw className="h-3 w-3" />
@@ -198,26 +224,27 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
             selectedRunId={selectedRunId}
             onSelect={setSelectedRunId}
           />
+          {loadingRuns && (
+            <p className="mt-2 text-[10px] text-muted-foreground">Refreshing runs...</p>
+          )}
         </div>
 
-        {/* Score + progress — only when a run is selected */}
         {selectedRunId && (
-          <div className="shrink-0 px-4 py-3 border-b border-archai-graphite space-y-3">
-            <ReadinessScoreCard score={runDetails?.run.readinessScore} isLoading={loadingDetails} />
-            <PrecheckProgressCard run={run} isLoading={loadingDetails} />
+          <div className="shrink-0 space-y-3 border-b border-archai-graphite px-4 py-3">
+            <ReadinessScoreCard score={run?.readinessScore} isLoading={loadingDetails} />
+            <PrecheckProgressCard run={run ?? selectedRun} isLoading={loadingDetails} />
           </div>
         )}
 
-        {/* Tabs */}
         {selectedRunId && (
           <>
-            <div className="shrink-0 flex border-b border-archai-graphite">
+            <div className="flex shrink-0 border-b border-archai-graphite">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
                   className={cn(
-                    'flex-1 py-2 text-xs font-medium transition-colors relative',
+                    'relative flex-1 py-2 text-xs font-medium transition-colors',
                     activeTab === tab.id
                       ? 'text-white after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[2px] after:bg-archai-orange'
                       : 'text-muted-foreground hover:text-white',
@@ -225,7 +252,7 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
                 >
                   {tab.label}
                   {tab.count != null && (
-                    <span className="ml-1 text-[10px] bg-archai-graphite rounded-full px-1.5">
+                    <span className="ml-1 rounded-full bg-archai-graphite px-1.5 text-[10px]">
                       {tab.count}
                     </span>
                   )}
@@ -234,7 +261,7 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
             </div>
 
             <ScrollArea className="flex-1">
-              <div className="p-4 space-y-4">
+              <div className="space-y-4 p-4">
                 {activeTab === 'setup' && (
                   <>
                     <SiteContextForm runId={selectedRunId} onSubmit={handleIngestSite} />
@@ -278,28 +305,38 @@ export function PrecheckWorkspace({ user }: PrecheckWorkspaceProps) {
           </>
         )}
 
-        {/* Empty state — no run selected */}
         {!selectedRunId && (
-          <div className="flex-1 flex items-center justify-center p-6">
-            <div className="text-center space-y-3">
+          <div className="flex flex-1 items-center justify-center p-6">
+            <div className="space-y-3 text-center">
               <p className="text-sm text-muted-foreground">Select a run or start a new check</p>
-              <Button variant="archai" size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="h-3.5 w-3.5 mr-2" />
+              <Button
+                variant="archai"
+                size="sm"
+                onClick={() => setCreateOpen(true)}
+                disabled={!projectId}
+              >
+                <Plus className="mr-2 h-3.5 w-3.5" />
                 Start New Check
               </Button>
+              {!projectId && (
+                <p className="text-[10px] text-muted-foreground">
+                  Create or select a real project before starting a pre-check run.
+                </p>
+              )}
             </div>
           </div>
         )}
       </aside>
 
-      {/* Modals */}
-      <CreatePrecheckRunDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        projectId={projectId}
-        userId={user.id}
-        onCreate={handleCreateRun}
-      />
+      {projectId && (
+        <CreatePrecheckRunDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          projectId={projectId}
+          userId={user.id}
+          onCreate={handleCreateRun}
+        />
+      )}
 
       <ComplianceIssueDrawer
         issue={selectedIssue}

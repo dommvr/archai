@@ -5,9 +5,11 @@ import type {
   GetRunDetailsResponse,
   IngestDocumentsInput,
   IngestSiteInput,
+  PrecheckRun,
+  ProjectRunsResponse,
   SyncSpeckleModelInput,
 } from "./types"
-import { GetRunDetailsResponseSchema } from "./schemas"
+import { GetRunDetailsResponseSchema, PrecheckRunSchema, ProjectRunsResponseSchema } from "./schemas"
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -27,11 +29,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json()
 }
 
-export async function createPrecheckRun(input: CreatePrecheckRunInput) {
-  return request("/api/agents/precheck", {
+export async function createPrecheckRun(input: CreatePrecheckRunInput): Promise<PrecheckRun> {
+  const data = await request<PrecheckRun>("/api/agents/precheck", {
     method: "POST",
     body: JSON.stringify({ action: "create_run", payload: input }),
   })
+  return PrecheckRunSchema.parse(data)
 }
 
 export async function ingestSite(input: IngestSiteInput) {
@@ -72,4 +75,9 @@ export async function evaluateCompliance(input: EvaluateComplianceInput) {
 export async function getRunDetails(runId: string): Promise<GetRunDetailsResponse> {
   const data = await request<GetRunDetailsResponse>(`/api/agents/precheck?runId=${runId}`)
   return GetRunDetailsResponseSchema.parse(data)
+}
+
+export async function listProjectRuns(projectId: string): Promise<ProjectRunsResponse> {
+  const data = await request<ProjectRunsResponse>(`/api/agents/precheck?projectId=${projectId}`)
+  return ProjectRunsResponseSchema.parse(data)
 }

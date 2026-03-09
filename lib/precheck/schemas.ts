@@ -247,6 +247,12 @@ export const GetRunDetailsResponseSchema = z.object({
   siteContext: SiteContextSchema.nullable(),
   modelRef: SpeckleModelRefSchema.nullable(),
   geometrySnapshot: GeometrySnapshotSchema.nullable(),
+  rules: z.array(ExtractedRuleSchema),
   issues: z.array(ComplianceIssueSchema),
   checklist: z.array(PermitChecklistItemSchema),
+})
+
+export const ProjectRunsResponseSchema = z.object({
+  runs: z.array(PrecheckRunSchema),
+  total: z.number().int().nonnegative(),
 })

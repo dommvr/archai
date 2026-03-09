@@ -14,6 +14,7 @@ import {
   IngestSiteInputSchema,
   PermitChecklistItemSchema,
   PrecheckRunSchema,
+  ProjectRunsResponseSchema,
   SiteContextSchema,
   SpeckleModelRefSchema,
   SyncSpeckleModelInputSchema,
@@ -39,3 +40,4 @@ export type ExtractRulesInput = z.infer<typeof ExtractRulesInputSchema>
 export type SyncSpeckleModelInput = z.infer<typeof SyncSpeckleModelInputSchema>
 export type EvaluateComplianceInput = z.infer<typeof EvaluateComplianceInputSchema>
 export type GetRunDetailsResponse = z.infer<typeof GetRunDetailsResponseSchema>
+export type ProjectRunsResponse = z.infer<typeof ProjectRunsResponseSchema>
