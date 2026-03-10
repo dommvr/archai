@@ -40,6 +40,16 @@ from app.core.schemas import (
 log = logging.getLogger(__name__)
 
 
+def _to_json_safe(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _to_json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_json_safe(item) for item in value]
+    return value
+
+
 class PrecheckRepository:
     def __init__(self, client: AsyncClient) -> None:
         self._db = client
@@ -93,6 +103,11 @@ class PrecheckRepository:
         patch: dict[str, Any] = {"status": status.value}
         if current_step is not None:
             patch["current_step"] = current_step
+        # Always clear a previous failure message when transitioning to a non-failed state.
+        # This prevents stale error_message from a prior run phase staying visible after recovery.
+        if status != PrecheckRunStatus.FAILED:
+            patch["error_message"] = None
+        # An explicit caller-supplied error_message always wins.
         if error_message is not None:
             patch["error_message"] = error_message
         result = (
@@ -197,11 +212,45 @@ class PrecheckRepository:
         result = await self._db.table("uploaded_documents").insert(row).execute()
         return UploadedDocument.model_validate(result.data[0])
 
+    async def get_document_by_id(self, document_id: UUID) -> UploadedDocument | None:
+        result = (
+            await self._db.table("uploaded_documents")
+            .select("*")
+            .eq("id", str(document_id))
+            .maybe_single()
+            .execute()
+        )
+        return UploadedDocument.model_validate(result.data) if result.data else None
+
+    async def delete_document(self, document_id: UUID) -> None:
+        await (
+            self._db.table("uploaded_documents")
+            .delete()
+            .eq("id", str(document_id))
+            .execute()
+        )
+
+    async def delete_documents_for_run(self, run_id: UUID) -> None:
+        await (
+            self._db.table("uploaded_documents")
+            .delete()
+            .eq("run_id", str(run_id))
+            .execute()
+        )
+
     # ── document_chunks ───────────────────────────────────────
 
     async def create_chunks_bulk(self, rows: list[dict[str, Any]]) -> list[DocumentChunk]:
         result = await self._db.table("document_chunks").insert(rows).execute()
         return [DocumentChunk.model_validate(r) for r in (result.data or [])]
+
+    async def delete_chunks_for_document(self, document_id: UUID) -> None:
+        await (
+            self._db.table("document_chunks")
+            .delete()
+            .eq("document_id", str(document_id))
+            .execute()
+        )
 
     async def get_chunks_for_document(self, document_id: UUID) -> list[DocumentChunk]:
         result = (
@@ -231,8 +280,37 @@ class PrecheckRepository:
     # ── extracted_rules ───────────────────────────────────────
 
     async def create_rules_bulk(self, rows: list[dict[str, Any]]) -> list[ExtractedRule]:
-        result = await self._db.table("extracted_rules").insert(rows).execute()
+        safe_rows = [_to_json_safe(row) for row in rows]
+        result = await self._db.table("extracted_rules").insert(safe_rows).execute()
         return [ExtractedRule.model_validate(r) for r in (result.data or [])]
+
+    async def delete_all_rules_for_document(self, document_id: UUID) -> None:
+        """
+        Deletes ALL rules (all statuses) for a single document.
+        Called when the document itself is being deleted — there is nothing to preserve.
+        """
+        await (
+            self._db.table("extracted_rules")
+            .delete()
+            .eq("document_id", str(document_id))
+            .execute()
+        )
+
+    async def delete_draft_rules_for_documents(self, document_ids: list[str]) -> None:
+        """
+        Deletes all draft-status rules for the given document IDs.
+        Called before re-extraction to keep the operation idempotent.
+        Reviewed and rejected rules are preserved intentionally.
+        """
+        if not document_ids:
+            return
+        await (
+            self._db.table("extracted_rules")
+            .delete()
+            .in_("document_id", document_ids)
+            .eq("status", RuleStatus.DRAFT.value)
+            .execute()
+        )
 
     async def get_rules_for_run(self, run_id: UUID) -> list[ExtractedRule]:
         """
@@ -337,3 +415,48 @@ class PrecheckRepository:
             .execute()
         )
         return PermitChecklistItem.model_validate(result.data[0])
+
+    # ── run-scoped cascade deletes ────────────────────────────
+    # Called in sequence by the delete_run endpoint. Order matters:
+    # run-scoped compliance data first, then document-scoped data, then the run row.
+
+    async def delete_checks_for_run(self, run_id: UUID) -> None:
+        await (
+            self._db.table("compliance_checks")
+            .delete()
+            .eq("run_id", str(run_id))
+            .execute()
+        )
+
+    async def delete_issues_for_run(self, run_id: UUID) -> None:
+        await (
+            self._db.table("compliance_issues")
+            .delete()
+            .eq("run_id", str(run_id))
+            .execute()
+        )
+
+    async def delete_checklist_for_run(self, run_id: UUID) -> None:
+        await (
+            self._db.table("permit_checklist_items")
+            .delete()
+            .eq("run_id", str(run_id))
+            .execute()
+        )
+
+    async def delete_snapshots_for_run(self, run_id: UUID) -> None:
+        await (
+            self._db.table("geometry_snapshots")
+            .delete()
+            .eq("run_id", str(run_id))
+            .execute()
+        )
+
+    async def delete_run(self, run_id: UUID) -> None:
+        """Deletes the precheck_run row. Call only after all dependent rows are gone."""
+        await (
+            self._db.table("precheck_runs")
+            .delete()
+            .eq("id", str(run_id))
+            .execute()
+        )

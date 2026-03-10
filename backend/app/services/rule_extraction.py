@@ -97,6 +97,13 @@ class RuleExtractionService:
         else:
             docs = await self._repo.get_documents_for_run(run_id)
 
+        # Delete existing draft rules before re-extracting (idempotency guarantee).
+        # Re-running extraction on the same documents produces an identical set of
+        # rules rather than accumulating duplicates.
+        # Reviewed and rejected rules are intentionally preserved.
+        doc_ids = [str(doc.id) for doc in docs]
+        await self._repo.delete_draft_rules_for_documents(doc_ids)
+
         all_rules: list[ExtractedRule] = []
 
         for doc in docs:

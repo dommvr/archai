@@ -180,6 +180,21 @@ class DocumentIngestionService:
         # TODO: OpenAI + pgvector integration
         log.info("embed_chunks: TODO — %d chunks not yet embedded", len(chunks))
 
+    # ── delete_from_storage ───────────────────────────────────
+
+    async def delete_from_storage(self, storage_path: str) -> None:
+        """
+        Removes a file from Supabase Storage.
+        Best-effort — logs but does not raise on failure so that the DB delete proceeds.
+        """
+        try:
+            await self._supabase.storage.from_(
+                settings.documents_storage_bucket
+            ).remove([storage_path])
+            log.info("Deleted storage file: %r", storage_path)
+        except Exception:
+            log.warning("Storage delete failed for %r — skipping", storage_path, exc_info=True)
+
     # ── run the full pipeline ─────────────────────────────────
 
     async def process_document(self, doc: UploadedDocument) -> list[DocumentChunk]:

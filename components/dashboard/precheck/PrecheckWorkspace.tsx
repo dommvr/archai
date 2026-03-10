@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -49,6 +49,37 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
   const [loadingDetails, setLoadingDetails] = useState(false)
   const [extracting, setExtracting] = useState(false)
 
+  // Ref that always reflects the current selectedRunId without closure staleness.
+  // handleSelectRun and fetchProjectRuns read this instead of the closed-over
+  // state value so that stale useCallback closures never misfire the early-return
+  // guard and cause double-invalidation.
+  const selectedRunIdRef = useRef<string | null>(null)
+
+  // Monotonically-increasing counter. Each call to fetchRunDetails increments it
+  // and captures the current value. After the async fetch resolves, we compare
+  // the captured value against the ref. If they differ, a newer fetch has started
+  // (because selectedRunId changed) and this response is stale — we discard it.
+  const runDetailsRequestIdRef = useRef(0)
+  const runDetailsAbortRef = useRef<AbortController | null>(null)
+
+  const invalidateRunDetails = useCallback((nextLoadingDetails: boolean) => {
+    runDetailsAbortRef.current?.abort()
+    runDetailsAbortRef.current = null
+    runDetailsRequestIdRef.current += 1
+    setRunDetails(null)
+    setLoadingDetails(nextLoadingDetails)
+  }, [])
+
+  // Reads selectedRunIdRef (always fresh) instead of the closed-over state value.
+  // This prevents stale useCallback closures from firing when selectedRunId has
+  // already been updated by a concurrent state flush — the root cause of the
+  // double-invalidation / stuck-loading bug on new-run creation and run-switching.
+  const handleSelectRun = useCallback((runId: string) => {
+    if (runId === selectedRunIdRef.current) return
+    invalidateRunDetails(true)
+    setSelectedRunId(runId)
+  }, [invalidateRunDetails])
+
   const fetchProjectRuns = useCallback(async (preferredRunId?: string) => {
     if (!projectId) {
       setRuns([])
@@ -60,15 +91,23 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     try {
       const { runs: projectRuns } = await precheckApi.listProjectRuns(projectId)
       setRuns(projectRuns)
-      setSelectedRunId((current) => {
-        if (preferredRunId && projectRuns.some((run) => run.id === preferredRunId)) {
-          return preferredRunId
-        }
-        if (current && projectRuns.some((run) => run.id === current)) {
-          return current
-        }
-        return projectRuns[0]?.id ?? null
-      })
+      // Read the ref (not the closed-over state) so this callback never acts on
+      // a stale selectedRunId value even if it was recreated before this await
+      // resolved.
+      const currentSelectedRunId = selectedRunIdRef.current
+      const nextSelectedRunId =
+        preferredRunId && projectRuns.some((run) => run.id === preferredRunId)
+          ? preferredRunId
+          : currentSelectedRunId && projectRuns.some((run) => run.id === currentSelectedRunId)
+            ? currentSelectedRunId
+            : projectRuns[0]?.id ?? null
+
+      if (nextSelectedRunId == null) {
+        invalidateRunDetails(false)
+        setSelectedRunId(null)
+      } else if (nextSelectedRunId !== currentSelectedRunId) {
+        handleSelectRun(nextSelectedRunId)
+      }
       return projectRuns
     } catch (err) {
       console.error('[PrecheckWorkspace] Failed to fetch project runs:', err)
@@ -76,17 +115,35 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     } finally {
       setLoadingRuns(false)
     }
-  }, [projectId])
+  }, [handleSelectRun, invalidateRunDetails, projectId])
 
   const fetchRunDetails = useCallback(async (runId: string) => {
+    // Increment the version counter and capture the version for this fetch.
+    // If selectedRunId changes before this fetch resolves, a newer call will
+    // increment the counter again. The stale response is discarded by the guard
+    // below, preventing a previous run's data from overwriting the current run.
+    runDetailsAbortRef.current?.abort()
+    const controller = new AbortController()
+    runDetailsAbortRef.current = controller
+    const requestId = ++runDetailsRequestIdRef.current
+
+    // Clear stale data and show skeleton before the fetch starts.
+    // Both setState calls are synchronous so React batches them into one render,
+    // preventing a brief "No run selected" flash between clearing and loading.
+    setRunDetails(null)
     setLoadingDetails(true)
     try {
-      const details = await precheckApi.getRunDetails(runId)
+      const details = await precheckApi.getRunDetails(runId, { signal: controller.signal })
+      if (runDetailsRequestIdRef.current !== requestId) return
       setRunDetails(details)
     } catch (err) {
+      if (controller.signal.aborted || runDetailsRequestIdRef.current !== requestId) return
       console.error('[PrecheckWorkspace] Failed to fetch run details:', err)
     } finally {
-      setLoadingDetails(false)
+      if (runDetailsRequestIdRef.current === requestId) {
+        runDetailsAbortRef.current = null
+        setLoadingDetails(false)
+      }
     }
   }, [])
 
@@ -97,16 +154,22 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     ])
   }, [fetchProjectRuns, fetchRunDetails])
 
+  // Keep the ref in sync with the state so that callbacks reading
+  // selectedRunIdRef.current always see the latest committed value.
+  useEffect(() => {
+    selectedRunIdRef.current = selectedRunId
+  }, [selectedRunId])
+
   useEffect(() => {
     if (!projectId) {
+      invalidateRunDetails(false)
       setRuns([])
       setSelectedRunId(null)
-      setRunDetails(null)
       return
     }
 
     void fetchProjectRuns()
-  }, [projectId, fetchProjectRuns])
+  }, [fetchProjectRuns, invalidateRunDetails, projectId])
 
   useEffect(() => {
     if (selectedRunId) {
@@ -114,14 +177,28 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
       return
     }
 
-    setRunDetails(null)
-  }, [selectedRunId, fetchRunDetails])
+    invalidateRunDetails(false)
+  }, [fetchRunDetails, invalidateRunDetails, selectedRunId])
+
+  useEffect(() => {
+    return () => {
+      runDetailsAbortRef.current?.abort()
+    }
+  }, [])
 
   async function handleCreateRun(pid: string, uid: string) {
     const run = await precheckApi.createPrecheckRun({ projectId: pid, createdBy: uid })
-    await refreshRunState(run.id)
-    setSelectedRunId(run.id)
     setActiveTab('setup')
+    // refreshRunState calls fetchProjectRuns(run.id) which internally calls
+    // handleSelectRun(run.id) — that is sufficient. Do NOT call handleSelectRun
+    // again here: handleCreateRun is an inline closure that captures the
+    // handleSelectRun from the render it was created in. By the time this await
+    // resolves the component has re-rendered (selectedRunId changed), so the
+    // captured handleSelectRun has a stale selectedRunId in its closure. Calling
+    // it would misfire the early-return guard, spuriously clear runDetails, set
+    // loadingDetails=true, and then never reset it (selectedRunId didn't change
+    // so the useEffect doesn't re-fire) → stuck blank form.
+    await refreshRunState(run.id)
   }
 
   async function handleIngestSite(input: IngestSiteInput) {
@@ -165,16 +242,56 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     setActiveTab('issues')
   }
 
+  async function handleDeleteDocument(documentId: string) {
+    await precheckApi.deleteDocument(documentId)
+    if (selectedRunId) {
+      await refreshRunState(selectedRunId)
+    }
+  }
+
+  async function handleDeleteRun(runId: string) {
+    await precheckApi.deleteRun(runId)
+    // Remove the deleted run from the local list immediately so the UI updates
+    // without waiting for a full project-runs refetch.
+    setRuns((prev) => prev.filter((r) => r.id !== runId))
+    if (selectedRunId === runId) {
+      // Select the next available run, or null if none remain
+      const remaining = runs.filter((r) => r.id !== runId)
+      const nextRunId = remaining[0]?.id ?? null
+      if (nextRunId) {
+        handleSelectRun(nextRunId)
+      } else {
+        invalidateRunDetails(false)
+        setSelectedRunId(null)
+      }
+    }
+    // Sync with backend to confirm final state
+    await fetchProjectRuns()
+  }
+
   function handleSelectIssue(issue: ComplianceIssue) {
     setSelectedIssue(issue)
     setDrawerOpen(true)
   }
 
-  const run = runDetails?.run ?? null
+  const currentRunDetails =
+    runDetails?.run.id === selectedRunId
+      ? runDetails
+      : null
+  const run = currentRunDetails?.run ?? null
   const selectedRun = runs.find((candidate) => candidate.id === selectedRunId) ?? null
-  const issues = runDetails?.issues ?? []
-  const checklist = runDetails?.checklist ?? []
-  const rules: ExtractedRule[] = runDetails?.rules ?? []
+  const issues = currentRunDetails?.issues ?? []
+  const checklist = currentRunDetails?.checklist ?? []
+  const rules: ExtractedRule[] = currentRunDetails?.rules ?? []
+
+  // True only when the fetched details belong to the currently-selected run and
+  // the fetch has fully settled. This is the render gate for setup panels —
+  // until this is true we show a skeleton, never a partially-populated or
+  // wrong-run form.
+  const detailsReadyForSelectedRun =
+    selectedRunId !== null &&
+    !loadingDetails &&
+    runDetails?.run.id === selectedRunId
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'setup', label: 'Setup' },
@@ -222,7 +339,8 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
           <PrecheckRunsList
             runs={runs}
             selectedRunId={selectedRunId}
-            onSelect={setSelectedRunId}
+            onSelect={handleSelectRun}
+            onDeleteRun={handleDeleteRun}
           />
           {loadingRuns && (
             <p className="mt-2 text-[10px] text-muted-foreground">Refreshing runs...</p>
@@ -232,7 +350,14 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
         {selectedRunId && (
           <div className="shrink-0 space-y-3 border-b border-archai-graphite px-4 py-3">
             <ReadinessScoreCard score={run?.readinessScore} isLoading={loadingDetails} />
-            <PrecheckProgressCard run={run ?? selectedRun} isLoading={loadingDetails} />
+            <PrecheckProgressCard
+              run={run ?? selectedRun}
+              hasSiteContext={currentRunDetails?.siteContext != null}
+              hasDocuments={(currentRunDetails?.documents?.length ?? 0) > 0}
+              hasRules={(currentRunDetails?.rules?.length ?? 0) > 0}
+              hasModelRef={currentRunDetails?.modelRef != null}
+              isLoading={loadingDetails}
+            />
           </div>
         )}
 
@@ -264,28 +389,71 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
               <div className="space-y-4 p-4">
                 {activeTab === 'setup' && (
                   <>
-                    <SiteContextForm runId={selectedRunId} onSubmit={handleIngestSite} />
-                    <DocumentUploadPanel runId={selectedRunId} onDocumentsReady={handleIngestDocuments} />
-                    <RuleExtractionStatusCard
-                      runId={selectedRunId}
-                      rules={rules}
-                      canExtract
-                      onExtract={handleExtractRules}
-                      isExtracting={extracting}
-                    />
-                    <SpeckleModelPicker runId={selectedRunId} onSync={handleSyncModel} />
+                    {!detailsReadyForSelectedRun ? (
+                      /*
+                        Skeleton shown whenever selectedRunId is set but details
+                        have not yet settled for THAT run. This prevents any
+                        possibility of showing a stale run's site context, a blank
+                        disabled form, or a double/stacked setup panel during
+                        transitions (run switching, new-run creation, or refresh).
+                      */
+                      <div className="space-y-4" aria-busy="true" aria-label="Loading run details">
+                        {[0, 1, 2].map((i) => (
+                          <div key={i} className="rounded-xl border border-archai-graphite bg-archai-charcoal p-4 space-y-3">
+                            <div className="h-4 w-32 rounded bg-archai-graphite animate-pulse" />
+                            <div className="h-3 w-full rounded bg-archai-graphite animate-pulse opacity-60" />
+                            <div className="h-3 w-3/4 rounded bg-archai-graphite animate-pulse opacity-40" />
+                            <div className="h-7 w-full rounded bg-archai-graphite animate-pulse opacity-50 mt-2" />
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      /*
+                        key={selectedRunId} forces a remount whenever the selected
+                        run changes, guaranteeing SiteContextForm's prefill effect
+                        fires with the new run's data and DocumentUploadPanel's
+                        pending state is cleared. Safe to mount here because
+                        detailsReadyForSelectedRun already guarantees the details
+                        belong to selectedRunId.
+                      */
+                      <>
+                        <SiteContextForm
+                          key={selectedRunId}
+                          runId={selectedRunId}
+                          onSubmit={handleIngestSite}
+                          siteContext={currentRunDetails?.siteContext}
+                          isLoading={false}
+                        />
+                        <DocumentUploadPanel
+                          key={selectedRunId}
+                          runId={selectedRunId}
+                          onDocumentsReady={handleIngestDocuments}
+                          existingDocuments={currentRunDetails?.documents ?? []}
+                          onDeleteDocument={handleDeleteDocument}
+                          isLoading={false}
+                        />
+                        <RuleExtractionStatusCard
+                          runId={selectedRunId}
+                          rules={rules}
+                          canExtract
+                          onExtract={handleExtractRules}
+                          isExtracting={extracting}
+                        />
+                        <SpeckleModelPicker runId={selectedRunId} onSync={handleSyncModel} />
 
-                    <Separator />
+                        <Separator />
 
-                    <Button
-                      variant="archai"
-                      size="sm"
-                      className="w-full"
-                      onClick={() => void handleEvaluate()}
-                      disabled={run?.status === 'completed'}
-                    >
-                      Run Compliance Check
-                    </Button>
+                        <Button
+                          variant="archai"
+                          size="sm"
+                          className="w-full"
+                          onClick={() => void handleEvaluate()}
+                          disabled={run?.status === 'completed'}
+                        >
+                          Run Compliance Check
+                        </Button>
+                      </>
+                    )}
                   </>
                 )}
 

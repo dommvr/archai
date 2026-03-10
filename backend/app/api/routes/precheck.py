@@ -47,11 +47,14 @@ from app.core.schemas import (
     GetRunDetailsResponse,
     IngestDocumentsRequest,
     IngestSiteRequest,
+    OkResponse,
     PrecheckRun,
     PrecheckRunStatus,
     ProjectRunsResponse,
+    RegisterDocumentRequest,
     ScoreContext,
     SyncSpeckleModelRequest,
+    UploadedDocument,
 )
 from app.repositories.precheck_repository import PrecheckRepository
 from app.services.compliance_engine import ComplianceEngineService
@@ -113,16 +116,18 @@ async def get_run_details(
         await repo.get_speckle_model_ref(run.speckle_model_ref_id)
         if run.speckle_model_ref_id else None
     )
-    snapshot  = await repo.get_latest_geometry_snapshot(run_id)
-    rules     = await repo.get_rules_for_run(run_id)
-    issues    = await repo.get_issues_for_run(run_id)
-    checklist = await repo.get_checklist_for_run(run_id)
+    snapshot   = await repo.get_latest_geometry_snapshot(run_id)
+    documents  = await repo.get_documents_for_run(run_id)
+    rules      = await repo.get_rules_for_run(run_id)
+    issues     = await repo.get_issues_for_run(run_id)
+    checklist  = await repo.get_checklist_for_run(run_id)
 
     return GetRunDetailsResponse(
         run=run,
         site_context=site_context,
         model_ref=model_ref,
         geometry_snapshot=snapshot,
+        documents=documents,
         rules=rules,
         issues=issues,
         checklist=checklist,
@@ -208,46 +213,80 @@ async def ingest_documents(
 
 
 # ════════════════════════════════════════════════════════════
+# POST /precheck/runs/{run_id}/register-document
+# Record metadata for a file already uploaded to Supabase Storage.
+# project_id is resolved from the run record server-side.
+# ════════════════════════════════════════════════════════════
+
+@router.post("/runs/{run_id}/register-document", response_model=UploadedDocument)
+async def register_document(
+    run_id: UUID,
+    body:   RegisterDocumentRequest,
+    user:   AuthenticatedUser       = Depends(get_current_user),
+    repo:   PrecheckRepository      = Depends(get_repository),
+    svc:    DocumentIngestionService = Depends(get_document_ingestion),
+) -> UploadedDocument:
+    """
+    Registers a document that the browser already uploaded to Supabase Storage.
+    Maps to: lib/precheck/api.ts → registerDocument()
+    """
+    run = await _require_run(repo, run_id)
+    doc = await svc.create_uploaded_document(
+        project_id=run.project_id,
+        run_id=run_id,
+        file_name=body.file_name,
+        mime_type=body.mime_type,
+        document_type=body.document_type.value,
+        storage_path=body.storage_path,
+    )
+    log.info(
+        "Registered document: id=%s name=%r for run=%s",
+        doc.id, doc.file_name, run_id,
+    )
+    return doc
+
+
+# ════════════════════════════════════════════════════════════
 # POST /precheck/runs/{run_id}/extract-rules
 # Run AI rule extraction over all ingested document chunks.
 # ════════════════════════════════════════════════════════════
 
-@router.post("/runs/{run_id}/extract-rules", response_model=AsyncActionResponse)
+@router.post("/runs/{run_id}/extract-rules", response_model=PrecheckRun)
 async def extract_rules(
-    run_id:           UUID,
-    background_tasks: BackgroundTasks,
-    user:             AuthenticatedUser    = Depends(get_current_user),
-    repo:             PrecheckRepository   = Depends(get_repository),
-    svc:              RuleExtractionService = Depends(get_rule_extraction),
-    pub:              RealtimePublisher     = Depends(get_realtime_publisher),
-) -> AsyncActionResponse:
+    run_id: UUID,
+    user:   AuthenticatedUser    = Depends(get_current_user),
+    repo:   PrecheckRepository   = Depends(get_repository),
+    svc:    RuleExtractionService = Depends(get_rule_extraction),
+    pub:    RealtimePublisher     = Depends(get_realtime_publisher),
+) -> PrecheckRun:
     """
-    Triggers rule extraction (background task).
-    Maps to: lib/precheck/api.ts → extractRules()
+    Runs rule extraction synchronously and returns the updated run.
 
+    V1 uses regex pattern matching (fast, ~ms). Running inline ensures that
+    the caller's subsequent refreshRunState() sees a fully-settled DB state.
+
+    When this is replaced with a LangGraph agent (slow, async), restore the
+    BackgroundTasks pattern and return AsyncActionResponse instead.
+
+    Maps to: lib/precheck/api.ts → extractRules()
     LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
     """
     await _require_run(repo, run_id)
     await pub.publish_run_status(run_id, PrecheckRunStatus.EXTRACTING_RULES, "Extracting rules")
 
-    async def _task() -> None:
-        try:
-            rules = await svc.extract_rules_from_chunks(run_id=run_id)
-            await pub.publish_run_status(
-                run_id, PrecheckRunStatus.CREATED,
-                current_step=f"Extracted {len(rules)} rules",
-            )
-        except Exception as exc:
-            log.exception("Rule extraction failed for run=%s", run_id)
-            await pub.publish_run_status(run_id, PrecheckRunStatus.FAILED, error_message=str(exc))
-
-    background_tasks.add_task(_task)
-
-    return AsyncActionResponse(
-        run_id=run_id,
-        status=PrecheckRunStatus.EXTRACTING_RULES,
-        message="Rule extraction started in background",
-    )
+    try:
+        rules = await svc.extract_rules_from_chunks(run_id=run_id)
+        updated = await repo.update_run_status(
+            run_id=run_id,
+            status=PrecheckRunStatus.CREATED,
+            current_step=f"Extracted {len(rules)} rules",
+        )
+        log.info("Rule extraction complete for run=%s, %d rules extracted", run_id, len(rules))
+        return updated
+    except Exception as exc:
+        log.exception("Rule extraction failed for run=%s", run_id)
+        await pub.publish_run_status(run_id, PrecheckRunStatus.FAILED, error_message=str(exc))
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 # ════════════════════════════════════════════════════════════
@@ -390,6 +429,87 @@ async def evaluate_compliance(
         status=PrecheckRunStatus.EVALUATING,
         message="Compliance evaluation started in background",
     )
+
+
+# ════════════════════════════════════════════════════════════
+# DELETE /precheck/documents/{document_id}
+# Remove a document: cascade rules → chunks → row → storage.
+# ════════════════════════════════════════════════════════════
+
+@router.delete("/documents/{document_id}", response_model=OkResponse)
+async def delete_document(
+    document_id: UUID,
+    user:  AuthenticatedUser        = Depends(get_current_user),
+    repo:  PrecheckRepository       = Depends(get_repository),
+    svc:   DocumentIngestionService = Depends(get_document_ingestion),
+) -> OkResponse:
+    """
+    Deletes a single uploaded document and all derived data.
+    Storage cleanup is best-effort (does not fail if file is missing).
+    Maps to: lib/precheck/api.ts → deleteDocument()
+    """
+    doc = await repo.get_document_by_id(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document {document_id} not found",
+        )
+
+    # Cascade: rules → chunks → document row
+    await repo.delete_all_rules_for_document(document_id)
+    await repo.delete_chunks_for_document(document_id)
+    await repo.delete_document(document_id)
+
+    # Best-effort storage cleanup
+    await svc.delete_from_storage(doc.storage_path)
+
+    log.info("Deleted document %s (%r)", document_id, doc.file_name)
+    return OkResponse()
+
+
+# ════════════════════════════════════════════════════════════
+# DELETE /precheck/runs/{run_id}
+# Remove a run and all run-scoped records.
+# ════════════════════════════════════════════════════════════
+
+@router.delete("/runs/{run_id}", response_model=OkResponse)
+async def delete_run(
+    run_id: UUID,
+    user:   AuthenticatedUser        = Depends(get_current_user),
+    repo:   PrecheckRepository       = Depends(get_repository),
+    svc:    DocumentIngestionService = Depends(get_document_ingestion),
+) -> OkResponse:
+    """
+    Deletes a precheck run and all dependent records in order:
+    checklist → issues → checks → snapshots →
+    (per document: rules → chunks → storage) → documents → run row.
+
+    site_contexts and speckle_model_refs are intentionally preserved
+    (they are project-scoped and may be shared across runs).
+
+    Maps to: lib/precheck/api.ts → deleteRun()
+    """
+    await _require_run(repo, run_id)
+
+    # Run-scoped compliance data first
+    await repo.delete_checklist_for_run(run_id)
+    await repo.delete_issues_for_run(run_id)
+    await repo.delete_checks_for_run(run_id)
+    await repo.delete_snapshots_for_run(run_id)
+
+    # Per-document: rules → chunks → storage (best-effort)
+    docs = await repo.get_documents_for_run(run_id)
+    for doc in docs:
+        await repo.delete_all_rules_for_document(doc.id)
+        await repo.delete_chunks_for_document(doc.id)
+        await svc.delete_from_storage(doc.storage_path)
+
+    # Document rows, then the run row
+    await repo.delete_documents_for_run(run_id)
+    await repo.delete_run(run_id)
+
+    log.info("Deleted run %s (%d documents)", run_id, len(docs))
+    return OkResponse()
 
 
 # ════════════════════════════════════════════════════════════

@@ -7,9 +7,16 @@ import type {
   IngestSiteInput,
   PrecheckRun,
   ProjectRunsResponse,
+  RegisterDocumentInput,
   SyncSpeckleModelInput,
+  UploadedDocument,
 } from "./types"
-import { GetRunDetailsResponseSchema, PrecheckRunSchema, ProjectRunsResponseSchema } from "./schemas"
+import {
+  GetRunDetailsResponseSchema,
+  PrecheckRunSchema,
+  ProjectRunsResponseSchema,
+  UploadedDocumentSchema,
+} from "./schemas"
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -72,12 +79,37 @@ export async function evaluateCompliance(input: EvaluateComplianceInput) {
   })
 }
 
-export async function getRunDetails(runId: string): Promise<GetRunDetailsResponse> {
-  const data = await request<GetRunDetailsResponse>(`/api/agents/precheck?runId=${runId}`)
+export async function getRunDetails(
+  runId: string,
+  init?: Pick<RequestInit, "signal">
+): Promise<GetRunDetailsResponse> {
+  const data = await request<GetRunDetailsResponse>(`/api/agents/precheck?runId=${runId}`, init)
   return GetRunDetailsResponseSchema.parse(data)
 }
 
 export async function listProjectRuns(projectId: string): Promise<ProjectRunsResponse> {
   const data = await request<ProjectRunsResponse>(`/api/agents/precheck?projectId=${projectId}`)
   return ProjectRunsResponseSchema.parse(data)
+}
+
+export async function registerDocument(input: RegisterDocumentInput): Promise<UploadedDocument> {
+  const data = await request<UploadedDocument>("/api/agents/precheck", {
+    method: "POST",
+    body: JSON.stringify({ action: "register_document", payload: input }),
+  })
+  return UploadedDocumentSchema.parse(data)
+}
+
+export async function deleteDocument(documentId: string): Promise<{ ok: true }> {
+  return request("/api/agents/precheck", {
+    method: "POST",
+    body: JSON.stringify({ action: "delete_document", payload: { documentId } }),
+  })
+}
+
+export async function deleteRun(runId: string): Promise<{ ok: true }> {
+  return request("/api/agents/precheck", {
+    method: "POST",
+    body: JSON.stringify({ action: "delete_run", payload: { runId } }),
+  })
 }

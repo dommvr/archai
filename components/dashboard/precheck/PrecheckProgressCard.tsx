@@ -28,25 +28,70 @@ const STATUS_ORDER: PrecheckRunStatus[] = [
 
 type StepState = 'done' | 'active' | 'idle' | 'error'
 
-function resolveStepState(step: PrecheckRunStatus, runStatus: PrecheckRunStatus): StepState {
-  if (runStatus === 'failed') {
-    const runIdx = STATUS_ORDER.indexOf('evaluating') // freeze at last active step
-    const stepIdx = STATUS_ORDER.indexOf(step)
-    return stepIdx < runIdx ? 'done' : 'error'
+interface StepDataOverrides {
+  hasSiteContext?: boolean
+  hasDocuments?: boolean
+  hasRules?: boolean
+  hasModelRef?: boolean
+}
+
+/**
+ * Derives step state from a combination of run status (for pipeline steps) and
+ * data presence (for setup steps).
+ *
+ * For setup steps (site / docs / rules / model), data presence ALWAYS wins —
+ * even if the run status happens to match the step (e.g. status=ingesting_docs
+ * set synchronously by the background-task endpoint before processing starts).
+ * This prevents the Documents step from showing a spinner when documents already
+ * exist in the DB because the background-task endpoint sets INGESTING_DOCS before
+ * returning, and refreshRunState sees that status before the task resets it.
+ *
+ * For pipeline steps (metrics / compliance / report) there is no equivalent DB
+ * presence check, so they fall back to STATUS_ORDER position.
+ */
+function resolveStepState(
+  step: PrecheckRunStatus,
+  runStatus: PrecheckRunStatus,
+  overrides: StepDataOverrides,
+): StepState {
+  // Setup steps: data presence wins; fall back to active/idle based on status.
+  switch (step) {
+    case 'ingesting_site':
+      return overrides.hasSiteContext ? 'done' : runStatus === step ? 'active' : 'idle'
+    case 'ingesting_docs':
+      return overrides.hasDocuments   ? 'done' : runStatus === step ? 'active' : 'idle'
+    case 'extracting_rules':
+      return overrides.hasRules       ? 'done' : runStatus === step ? 'active' : 'idle'
+    case 'syncing_model':
+      return overrides.hasModelRef    ? 'done' : runStatus === step ? 'active' : 'idle'
   }
-  const runIdx = STATUS_ORDER.indexOf(runStatus)
+
+  // Pipeline steps: driven by run status position.
+  if (runStatus === step) return 'active'
+  if (runStatus === 'completed') return 'done'
+  if (runStatus === 'failed') return 'error'
+  const runIdx  = STATUS_ORDER.indexOf(runStatus)
   const stepIdx = STATUS_ORDER.indexOf(step)
-  if (stepIdx < runIdx) return 'done'
-  if (stepIdx === runIdx) return 'active'
-  return 'idle'
+  return stepIdx < runIdx ? 'done' : 'idle'
 }
 
 interface PrecheckProgressCardProps {
   run: PrecheckRun | null | undefined
+  hasSiteContext?: boolean
+  hasDocuments?: boolean
+  hasRules?: boolean
+  hasModelRef?: boolean
   isLoading?: boolean
 }
 
-export function PrecheckProgressCard({ run, isLoading }: PrecheckProgressCardProps) {
+export function PrecheckProgressCard({
+  run,
+  hasSiteContext = false,
+  hasDocuments   = false,
+  hasRules       = false,
+  hasModelRef    = false,
+  isLoading,
+}: PrecheckProgressCardProps) {
   if (isLoading) {
     return (
       <div className="rounded-xl border border-archai-graphite bg-archai-charcoal p-4 space-y-3">
@@ -92,7 +137,7 @@ export function PrecheckProgressCard({ run, isLoading }: PrecheckProgressCardPro
 
       <div className="space-y-1.5">
         {STEPS.map(({ status, label }) => {
-          const state = resolveStepState(status, run.status)
+          const state = resolveStepState(status, run.status, { hasSiteContext, hasDocuments, hasRules, hasModelRef })
           return (
             <div key={status} className="flex items-center gap-2">
               <div className={cn(

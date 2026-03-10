@@ -258,11 +258,20 @@ export const EvaluateComplianceInputSchema = z.object({
   runId: z.string().uuid(),
 })
 
+export const RegisterDocumentInputSchema = z.object({
+  runId: z.string().uuid(),
+  storagePath: z.string().min(1),
+  fileName: z.string().min(1),
+  mimeType: z.string().min(1),
+  documentType: z.enum(["zoning_code", "building_code", "project_doc", "other"]),
+})
+
 export const GetRunDetailsResponseSchema = z.object({
   run: PrecheckRunSchema,
   siteContext: SiteContextSchema.nullable(),
   modelRef: SpeckleModelRefSchema.nullable(),
   geometrySnapshot: GeometrySnapshotSchema.nullable(),
+  documents: z.array(UploadedDocumentSchema),
   rules: z.array(ExtractedRuleSchema),
   issues: z.array(ComplianceIssueSchema),
   checklist: z.array(PermitChecklistItemSchema),
@@ -271,4 +280,12 @@ export const GetRunDetailsResponseSchema = z.object({
 export const ProjectRunsResponseSchema = z.object({
   runs: z.array(PrecheckRunSchema),
   total: z.number().int().nonnegative(),
+})
+
+export const DeleteDocumentInputSchema = z.object({
+  documentId: z.string().uuid(),
+})
+
+export const DeleteRunInputSchema = z.object({
+  runId: z.string().uuid(),
 })

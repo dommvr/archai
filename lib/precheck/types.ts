@@ -4,6 +4,8 @@ import {
   ComplianceCheckSchema,
   ComplianceIssueSchema,
   CreatePrecheckRunInputSchema,
+  DeleteDocumentInputSchema,
+  DeleteRunInputSchema,
   DocumentChunkSchema,
   EvaluateComplianceInputSchema,
   ExtractedRuleSchema,
@@ -15,6 +17,7 @@ import {
   PermitChecklistItemSchema,
   PrecheckRunSchema,
   ProjectRunsResponseSchema,
+  RegisterDocumentInputSchema,
   SiteContextSchema,
   SpeckleModelRefSchema,
   SyncSpeckleModelInputSchema,
@@ -39,5 +42,8 @@ export type IngestDocumentsInput = z.infer<typeof IngestDocumentsInputSchema>
 export type ExtractRulesInput = z.infer<typeof ExtractRulesInputSchema>
 export type SyncSpeckleModelInput = z.infer<typeof SyncSpeckleModelInputSchema>
 export type EvaluateComplianceInput = z.infer<typeof EvaluateComplianceInputSchema>
+export type RegisterDocumentInput = z.infer<typeof RegisterDocumentInputSchema>
 export type GetRunDetailsResponse = z.infer<typeof GetRunDetailsResponseSchema>
 export type ProjectRunsResponse = z.infer<typeof ProjectRunsResponseSchema>
+export type DeleteDocumentInput = z.infer<typeof DeleteDocumentInputSchema>
+export type DeleteRunInput = z.infer<typeof DeleteRunInputSchema>

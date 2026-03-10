@@ -347,6 +347,19 @@ class SyncSpeckleModelRequest(BaseSchema):
     model_name: str | None = None
 
 
+class RegisterDocumentRequest(BaseSchema):
+    """
+    POST /precheck/runs/{id}/register-document
+
+    Records a file that the client already uploaded to Supabase Storage.
+    project_id is resolved server-side from the run record.
+    """
+    storage_path: str = Field(min_length=1)
+    file_name: str = Field(min_length=1)
+    mime_type: str = Field(min_length=1)
+    document_type: DocumentType
+
+
 # ExtractRules and EvaluateCompliance have no extra body fields in V1;
 # run_id comes from the URL path only.
 
@@ -361,6 +374,7 @@ class GetRunDetailsResponse(BaseSchema):
     site_context: SiteContext | None = None
     model_ref: SpeckleModelRef | None = None
     geometry_snapshot: GeometrySnapshot | None = None
+    documents: list[UploadedDocument] = Field(default_factory=list)
     rules: list[ExtractedRule] = Field(default_factory=list)
     issues: list[ComplianceIssue] = Field(default_factory=list)
     checklist: list[PermitChecklistItem] = Field(default_factory=list)
@@ -396,3 +410,8 @@ class AsyncActionResponse(BaseSchema):
     run_id: UUID
     status: PrecheckRunStatus
     message: str
+
+
+class OkResponse(BaseSchema):
+    """Returned by DELETE endpoints to avoid 204 No Content body-parsing issues."""
+    ok: bool = True

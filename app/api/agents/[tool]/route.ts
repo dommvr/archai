@@ -4,10 +4,13 @@ import { getSupabaseServerClient } from '@/lib/supabase/server'
 import type { ToolId } from '@/types'
 import {
   CreatePrecheckRunInputSchema,
+  DeleteDocumentInputSchema,
+  DeleteRunInputSchema,
   EvaluateComplianceInputSchema,
   ExtractRulesInputSchema,
   IngestDocumentsInputSchema,
   IngestSiteInputSchema,
+  RegisterDocumentInputSchema,
   SyncSpeckleModelInputSchema,
 } from '@/lib/precheck/schemas'
 
@@ -18,6 +21,9 @@ type PrecheckAction =
   | 'extract_rules'
   | 'sync_speckle_model'
   | 'evaluate_compliance'
+  | 'register_document'
+  | 'delete_document'
+  | 'delete_run'
 
 type PrecheckPayload = Record<string, unknown>
 
@@ -251,6 +257,51 @@ async function handlePrecheckPost(
       })
     }
 
+    case 'register_document': {
+      const parsed = validatePayload(RegisterDocumentInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/register-document`,
+        method: 'POST',
+        body: {
+          storagePath: parsed.storagePath,
+          fileName: parsed.fileName,
+          mimeType: parsed.mimeType,
+          documentType: parsed.documentType,
+        },
+      })
+    }
+
+    case 'delete_document': {
+      const parsed = validatePayload(DeleteDocumentInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/documents/${parsed.documentId}`,
+        method: 'DELETE',
+      })
+    }
+
+    case 'delete_run': {
+      const parsed = validatePayload(DeleteRunInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}`,
+        method: 'DELETE',
+      })
+    }
+
     default:
       return NextResponse.json({ error: `Unknown precheck action: ${action}` }, { status: 400 })
   }
@@ -318,7 +369,7 @@ function validatePayload<T>(
 async function proxyFastApi(input: {
   accessToken: string
   path: string
-  method: 'GET' | 'POST'
+  method: 'GET' | 'POST' | 'DELETE'
   body?: unknown
 }) {
   const baseUrl = getFastApiBaseUrl()
