@@ -3,21 +3,46 @@ backend/app/core/auth.py
 
 Supabase JWT validation.
 
-The Next.js frontend passes the user's Supabase access token in the
-Authorization: Bearer header. FastAPI validates it using the shared
-SUPABASE_JWT_SECRET to confirm the request is from an authenticated user.
+The Next.js route forwards the user's Supabase access token as
+  Authorization: Bearer <token>
+FastAPI validates it using one of two paths, chosen by the `alg` header claim:
 
-Never forward the service-role key to the client. The service-role key is
-only used for server-side Supabase operations in the repository layer.
+  PRIMARY  — Asymmetric (ES256 / RS256)
+    Active signing algorithm for Supabase projects on the newer key format.
+    Public keys are fetched from the Supabase JWKS endpoint and cached in
+    memory by PyJWKClient. Cache is invalidated automatically on a `kid` miss
+    (i.e. after a key rotation). No secret needs to be deployed.
+
+    JWKS URL (default): {SUPABASE_URL}/auth/v1/.well-known/jwks.json
+    Override via: SUPABASE_JWKS_URL env var.
+
+  FALLBACK — HS256 shared secret
+    Retained for legacy tokens during key-rotation transitions.
+    Active only when SUPABASE_JWT_SECRET is present in the environment.
+    On fresh deployments leave SUPABASE_JWT_SECRET unset to hard-disable.
+
+Architecture notes:
+  - AuthenticatedUser output shape is unchanged; downstream code is unaffected.
+  - extract_bearer_token is unchanged; dependencies.py is unaffected.
+  - Never forward the service-role key to the client. That key is only used
+    in the repository layer for server-side Supabase DB access.
 """
 
 from __future__ import annotations
 
+import functools
+import logging
+
 import jwt
 from fastapi import HTTPException, status
-from jwt import ExpiredSignatureError, InvalidTokenError
+from jwt import ExpiredSignatureError, InvalidTokenError, PyJWKClient
 
 from app.core.config import settings
+
+log = logging.getLogger(__name__)
+
+
+# ── Public types ──────────────────────────────────────────────
 
 
 class AuthenticatedUser:
@@ -31,36 +56,59 @@ class AuthenticatedUser:
         return f"AuthenticatedUser(user_id={self.user_id!r})"
 
 
+# ── JWKS client singleton ─────────────────────────────────────
+
+
+@functools.lru_cache(maxsize=1)
+def _jwks_client() -> PyJWKClient:
+    """
+    Return the module-level JWKS client, initialised exactly once.
+
+    PyJWKClient fetches and caches the JWKS on first use, then re-fetches
+    automatically whenever a `kid` is not found in the local cache (key
+    rotation).  lru_cache makes this construction thread-safe without an
+    explicit lock.
+    """
+    url = settings.jwks_url
+    log.info("Initialising JWKS client → %s", url)
+    return PyJWKClient(url, cache_jwk_set=True, cache_keys=True)
+
+
+# ── Public entry points ───────────────────────────────────────
+
+
 def validate_supabase_jwt(token: str) -> AuthenticatedUser:
     """
-    Decode and validate a Supabase JWT.
+    Decode and validate a Supabase access token.
 
-    Supabase issues HS256 JWTs signed with the project's JWT secret.
-    The `aud` claim is "authenticated" for logged-in users.
+    Routing by `alg` claim in the JWT header:
+      ES256 / RS256  → asymmetric JWKS path   (primary)
+      HS256          → shared-secret path      (legacy fallback)
 
-    Raises HTTPException(401) on any validation failure.
+    Raises HTTPException 401 on any validation failure so that FastAPI
+    returns a properly formatted error response.
     """
     try:
-        payload: dict = jwt.decode(
-            token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={
-                "verify_exp": True,
-                "verify_aud": True,
-            },
-        )
-    except ExpiredSignatureError:
+        header = jwt.get_unverified_header(token)
+    except InvalidTokenError as exc:
+        log.warning("JWT header parse failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
+            detail="Malformed token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except InvalidTokenError as exc:
+
+    alg = header.get("alg", "")
+
+    if alg in ("ES256", "RS256"):
+        payload = _verify_asymmetric(token, alg)
+    elif alg == "HS256":
+        payload = _verify_hs256(token)
+    else:
+        log.warning("JWT rejected — unsupported algorithm: %r", alg)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {exc}",
+            detail=f"Unsupported JWT algorithm: {alg}",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -96,3 +144,82 @@ def extract_bearer_token(authorization: str | None) -> str:
             headers={"WWW-Authenticate": "Bearer"},
         )
     return token
+
+
+# ── Private verification helpers ──────────────────────────────
+
+
+def _verify_asymmetric(token: str, alg: str) -> dict:
+    """
+    Verify an ES256 or RS256 Supabase token via the JWKS endpoint.
+
+    PyJWKClient matches the JWT's `kid` header to the correct public key
+    from the cached JWKS.  On a cache miss it re-fetches automatically, so
+    key rotations are handled without a restart.
+    """
+    try:
+        signing_key = _jwks_client().get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=[alg],
+            audience="authenticated",
+            options={"verify_exp": True, "verify_aud": True},
+        )
+    except ExpiredSignatureError:
+        log.info("Asymmetric JWT rejected — expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except InvalidTokenError as exc:
+        log.warning("Asymmetric JWT validation failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def _verify_hs256(token: str) -> dict:
+    """
+    Verify a legacy HS256 Supabase token using SUPABASE_JWT_SECRET.
+
+    Returns 401 immediately if the secret is not configured, which
+    hard-disables this path on deployments that have fully migrated to
+    asymmetric signing.
+    """
+    if not settings.supabase_jwt_secret:
+        log.warning(
+            "HS256 token received but SUPABASE_JWT_SECRET is not set; "
+            "legacy fallback is disabled — set SUPABASE_JWT_SECRET to enable"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Legacy token type not accepted",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        return jwt.decode(
+            token,
+            settings.supabase_jwt_secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+            options={"verify_exp": True, "verify_aud": True},
+        )
+    except ExpiredSignatureError:
+        log.info("HS256 JWT rejected — expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except InvalidTokenError as exc:
+        log.warning("HS256 JWT validation failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )

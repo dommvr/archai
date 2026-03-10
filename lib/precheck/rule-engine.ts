@@ -53,7 +53,7 @@ export function evaluateRule(
     }
   }
 
-  if (rule.operator === "<=" && rule.valueNumber !== undefined) {
+  if (rule.operator === "<=" && rule.valueNumber != null) {
     const pass = actualValue <= rule.valueNumber
     return {
       ruleId: rule.id,
@@ -62,7 +62,7 @@ export function evaluateRule(
       severity: pass ? "info" : "error",
       actualValue,
       expectedValue: rule.valueNumber,
-      units: rule.units,
+      units: rule.units ?? undefined,
       title: rule.title,
       summary: pass
         ? `${rule.metricKey} is within the allowed limit.`
@@ -71,7 +71,7 @@ export function evaluateRule(
     }
   }
 
-  if (rule.operator === ">=" && rule.valueNumber !== undefined) {
+  if (rule.operator === ">=" && rule.valueNumber != null) {
     const pass = actualValue >= rule.valueNumber
     return {
       ruleId: rule.id,
@@ -80,7 +80,7 @@ export function evaluateRule(
       severity: pass ? "info" : "error",
       actualValue,
       expectedValue: rule.valueNumber,
-      units: rule.units,
+      units: rule.units ?? undefined,
       title: rule.title,
       summary: pass
         ? `${rule.metricKey} meets the minimum requirement.`
@@ -91,8 +91,8 @@ export function evaluateRule(
 
   if (
     rule.operator === "between" &&
-    rule.valueMin !== undefined &&
-    rule.valueMax !== undefined
+    rule.valueMin != null &&
+    rule.valueMax != null
   ) {
     const pass = actualValue >= rule.valueMin && actualValue <= rule.valueMax
     return {
@@ -103,7 +103,7 @@ export function evaluateRule(
       actualValue,
       expectedMin: rule.valueMin,
       expectedMax: rule.valueMax,
-      units: rule.units,
+      units: rule.units ?? undefined,
       title: rule.title,
       summary: pass
         ? `${rule.metricKey} falls within the allowed range.`
@@ -118,7 +118,7 @@ export function evaluateRule(
     status: "ambiguous",
     severity: "warning",
     actualValue,
-    units: rule.units,
+    units: rule.units ?? undefined,
     title: rule.title,
     summary: "Rule operator/value combination is not fully supported yet.",
     affectedObjectIds: [],

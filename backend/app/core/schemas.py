@@ -185,8 +185,10 @@ class DocumentChunk(BaseSchema):
     page: int | None = None
     section: str | None = None
     chunk_index: int
-    # Note: field is 'chunk_text' in Postgres (reserved word avoidance) but 'text' in TS schema
-    text: str
+    # DB column is 'chunk_text' (reserved-word avoidance); TS contract uses 'text'.
+    # validation_alias maps the DB row value to this field without changing the
+    # camelCase serialisation alias ('text') that the TypeScript schemas expect.
+    text: str = Field(validation_alias="chunk_text")
     embedding: list[float] | None = None
     metadata: dict[str, Any] | None = None
 

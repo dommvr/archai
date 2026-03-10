@@ -22,99 +22,106 @@ export const PolygonSchema = z.object({
 
 export const RuleCitationSchema = z.object({
   documentId: z.string().uuid(),
-  page: z.number().int().nonnegative().optional(),
-  section: z.string().optional(),
+  page: z.number().int().nonnegative().nullable().optional(),
+  section: z.string().nullable().optional(),
   snippet: z.string(),
-  chunkId: z.string().uuid().optional(),
+  chunkId: z.string().uuid().nullable().optional(),
 })
 
 export const ApplicabilitySchema = z.object({
-  jurisdictionCode: z.string().optional(),
+  jurisdictionCode: z.string().nullable().optional(),
   zoningDistricts: z.array(z.string()).default([]),
   buildingTypes: z.array(z.string()).default([]),
   occupancies: z.array(z.string()).default([]),
 })
 
+// All text/numeric/jsonb columns without NOT NULL in site_contexts are nullable.
 export const SiteContextSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
-  address: z.string().optional(),
-  municipality: z.string().optional(),
-  jurisdictionCode: z.string().optional(),
-  zoningDistrict: z.string().optional(),
+  address: z.string().nullable().optional(),
+  municipality: z.string().nullable().optional(),
+  jurisdictionCode: z.string().nullable().optional(),
+  zoningDistrict: z.string().nullable().optional(),
   overlays: z.array(z.string()).default([]),
-  parcelId: z.string().optional(),
-  parcelAreaM2: z.number().optional(),
-  centroid: LatLngSchema.optional(),
-  parcelBoundary: PolygonSchema.optional(),
+  parcelId: z.string().nullable().optional(),
+  parcelAreaM2: z.number().nullable().optional(),
+  centroid: LatLngSchema.nullable().optional(),
+  parcelBoundary: PolygonSchema.nullable().optional(),
   sourceProvider: z.string(),
   rawSourceData: z.unknown().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
 
+// run_id and jurisdiction_code are nullable in uploaded_documents.
 export const UploadedDocumentSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
-  runId: z.string().uuid().optional(),
+  runId: z.string().uuid().nullable().optional(),
   storagePath: z.string(),
   fileName: z.string(),
   mimeType: z.string(),
   documentType: z.enum(["zoning_code", "building_code", "project_doc", "other"]),
-  jurisdictionCode: z.string().optional(),
+  jurisdictionCode: z.string().nullable().optional(),
   uploadedAt: z.string(),
 })
 
+// All nullable columns in document_chunks: page, section, embedding_raw, metadata.
 export const DocumentChunkSchema = z.object({
   id: z.string().uuid(),
   documentId: z.string().uuid(),
-  page: z.number().int().nonnegative().optional(),
-  section: z.string().optional(),
+  page: z.number().int().nonnegative().nullable().optional(),
+  section: z.string().nullable().optional(),
   chunkIndex: z.number().int().nonnegative(),
   text: z.string(),
-  embedding: z.array(z.number()).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+  embedding: z.array(z.number()).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).nullable().optional(),
 })
 
+// Nullable columns: description, value_number, value_min, value_max,
+// units, extraction_notes — all text/numeric without NOT NULL.
 export const ExtractedRuleSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
   documentId: z.string().uuid(),
   ruleCode: z.string(),
   title: z.string(),
-  description: z.string().optional(),
+  description: z.string().nullable().optional(),
   metricKey: z.enum(METRIC_KEYS),
   operator: z.enum(["<", "<=", ">", ">=", "=", "between"]),
-  valueNumber: z.number().optional(),
-  valueMin: z.number().optional(),
-  valueMax: z.number().optional(),
-  units: z.string().optional(),
+  valueNumber: z.number().nullable().optional(),
+  valueMin: z.number().nullable().optional(),
+  valueMax: z.number().nullable().optional(),
+  units: z.string().nullable().optional(),
   applicability: ApplicabilitySchema,
   citation: RuleCitationSchema,
   confidence: z.number().min(0).max(1),
   status: z.enum(RULE_STATUSES),
-  extractionNotes: z.string().optional(),
+  extractionNotes: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
 
+// branch_name, model_name, commit_message are nullable in speckle_model_refs.
 export const SpeckleModelRefSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
   streamId: z.string(),
-  branchName: z.string().optional(),
+  branchName: z.string().nullable().optional(),
   versionId: z.string(),
-  modelName: z.string().optional(),
-  commitMessage: z.string().optional(),
+  modelName: z.string().nullable().optional(),
+  commitMessage: z.string().nullable().optional(),
   selectedAt: z.string(),
 })
 
+// units and computationNotes are serialised as null by Pydantic when unset.
 export const GeometrySnapshotMetricSchema = z.object({
   key: z.enum(METRIC_KEYS),
   value: z.number(),
-  units: z.string().optional(),
+  units: z.string().nullable().optional(),
   sourceObjectIds: z.array(z.string()).default([]),
-  computationNotes: z.string().optional(),
+  computationNotes: z.string().nullable().optional(),
 })
 
 export const GeometrySnapshotSchema = z.object({
@@ -122,12 +129,12 @@ export const GeometrySnapshotSchema = z.object({
   projectId: z.string().uuid(),
   runId: z.string().uuid(),
   speckleModelRefId: z.string().uuid(),
-  siteBoundary: PolygonSchema.optional(),
+  siteBoundary: PolygonSchema.nullable().optional(),
   buildingFootprints: z.array(
     z.object({
       objectId: z.string(),
       polygon: PolygonSchema,
-      level: z.string().optional(),
+      level: z.string().nullable().optional(),
     })
   ).default([]),
   floors: z.array(
@@ -142,53 +149,62 @@ export const GeometrySnapshotSchema = z.object({
   createdAt: z.string(),
 })
 
+// actual_value, expected_value, expected_min, expected_max, units are
+// nullable numeric/text columns in compliance_checks.
 export const ComplianceCheckSchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
   ruleId: z.string().uuid(),
   metricKey: z.enum(METRIC_KEYS),
   status: z.enum(CHECK_RESULT_STATUSES),
-  actualValue: z.number().optional(),
-  expectedValue: z.number().optional(),
-  expectedMin: z.number().optional(),
-  expectedMax: z.number().optional(),
-  units: z.string().optional(),
+  actualValue: z.number().nullable().optional(),
+  expectedValue: z.number().nullable().optional(),
+  expectedMin: z.number().nullable().optional(),
+  expectedMax: z.number().nullable().optional(),
+  units: z.string().nullable().optional(),
   createdAt: z.string(),
 })
 
+// rule_id and check_id use ON DELETE SET NULL so they are nullable UUIDs.
+// explanation, metric_key, value fields, citation, affected_geometry are
+// all nullable columns in compliance_issues.
 export const ComplianceIssueSchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
-  ruleId: z.string().uuid().optional(),
-  checkId: z.string().uuid().optional(),
+  ruleId: z.string().uuid().nullable().optional(),
+  checkId: z.string().uuid().nullable().optional(),
   severity: z.enum(ISSUE_SEVERITIES),
   title: z.string(),
   summary: z.string(),
-  explanation: z.string().optional(),
+  explanation: z.string().nullable().optional(),
   status: z.enum(CHECK_RESULT_STATUSES),
-  metricKey: z.enum(METRIC_KEYS).optional(),
-  actualValue: z.number().optional(),
-  expectedValue: z.number().optional(),
-  expectedMin: z.number().optional(),
-  expectedMax: z.number().optional(),
-  units: z.string().optional(),
-  citation: RuleCitationSchema.optional(),
+  metricKey: z.enum(METRIC_KEYS).nullable().optional(),
+  actualValue: z.number().nullable().optional(),
+  expectedValue: z.number().nullable().optional(),
+  expectedMin: z.number().nullable().optional(),
+  expectedMax: z.number().nullable().optional(),
+  units: z.string().nullable().optional(),
+  citation: RuleCitationSchema.nullable().optional(),
   affectedObjectIds: z.array(z.string()).default([]),
-  affectedGeometry: PolygonSchema.optional(),
+  affectedGeometry: PolygonSchema.nullable().optional(),
   createdAt: z.string(),
 })
 
+// description is nullable in permit_checklist_items.
 export const PermitChecklistItemSchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
   category: z.enum(CHECKLIST_CATEGORIES),
   title: z.string(),
-  description: z.string().optional(),
+  description: z.string().nullable().optional(),
   required: z.boolean().default(true),
   resolved: z.boolean().default(false),
   createdAt: z.string(),
 })
 
+// site_context_id and speckle_model_ref_id are FK UUIDs with ON DELETE SET NULL.
+// readiness_score and error_message are nullable by design (unset until evaluated).
+// current_step is nullable text — null on a freshly created run.
 export const PrecheckRunSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
@@ -196,7 +212,7 @@ export const PrecheckRunSchema = z.object({
   speckleModelRefId: z.string().uuid().nullable().optional(),
   status: z.enum(PRECHECK_RUN_STATUSES),
   readinessScore: z.number().min(0).max(100).nullable().optional(),
-  currentStep: z.string().optional(),
+  currentStep: z.string().nullable().optional(),
   errorMessage: z.string().nullable().optional(),
   createdBy: z.string().uuid(),
   createdAt: z.string(),

@@ -16,21 +16,13 @@
  *   return res.json()
  *
  * Remove the placeholder comments when implementing real logic.
+ *
+ * Note: Tool 1 (precheck) operations — create run, list runs, get run details —
+ * are wired end-to-end via lib/precheck/api.ts (client-side) → /api/agents/precheck → FastAPI.
+ * Do not add server-action wrappers for those three operations here.
  */
 
-import { headers } from 'next/headers'
 import type { ToolResult } from '@/types'
-import { GetRunDetailsResponseSchema, PrecheckRunSchema, ProjectRunsResponseSchema } from '@/lib/precheck/schemas'
-import type {
-  CreatePrecheckRunInput,
-  IngestSiteInput,
-  IngestDocumentsInput,
-  ExtractRulesInput,
-  SyncSpeckleModelInput,
-  EvaluateComplianceInput,
-  GetRunDetailsResponse,
-  PrecheckRun,
-} from '@/lib/precheck/types'
 
 type ToolPayload = Record<string, unknown>
 
@@ -232,90 +224,6 @@ export async function runExportSync(projectId: string, format: 'ifc' | 'revit' |
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool 1: Smart Zoning & Code Checker — typed precheck action wrappers
-// READY FOR TOOL 1 INTEGRATION HERE
-// ─────────────────────────────────────────────────────────────────────────────
-
-export async function createPrecheckRun(
-  input: CreatePrecheckRunInput
-): Promise<ToolResult<PrecheckRun>> {
-  const data = PrecheckRunSchema.parse(
-    await callPrecheckRoute('POST', { action: 'create_run', payload: input })
-  )
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data,
-  }
-}
-
-export async function ingestSiteContext(input: IngestSiteInput): Promise<ToolResult> {
-  await callPrecheckRoute('POST', { action: 'ingest_site', payload: input })
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data: null,
-  }
-}
-
-export async function ingestPrecheckDocuments(input: IngestDocumentsInput): Promise<ToolResult> {
-  await callPrecheckRoute('POST', { action: 'ingest_documents', payload: input })
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data: null,
-  }
-}
-
-export async function extractPrecheckRules(input: ExtractRulesInput): Promise<ToolResult> {
-  await callPrecheckRoute('POST', { action: 'extract_rules', payload: input })
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data: null,
-  }
-}
-
-export async function syncPrecheckSpeckleModel(input: SyncSpeckleModelInput): Promise<ToolResult> {
-  await callPrecheckRoute('POST', { action: 'sync_speckle_model', payload: input })
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data: null,
-  }
-}
-
-export async function evaluatePrecheckCompliance(input: EvaluateComplianceInput): Promise<ToolResult> {
-  await callPrecheckRoute('POST', { action: 'evaluate_compliance', payload: input })
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data: null,
-  }
-}
-
-export async function getPrecheckRunDetails(runId: string): Promise<ToolResult<GetRunDetailsResponse>> {
-  const data = GetRunDetailsResponseSchema.parse(
-    await callPrecheckRoute('GET', undefined, `?runId=${encodeURIComponent(runId)}`)
-  )
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data,
-  }
-}
-
-export async function listProjectPrecheckRuns(projectId: string): Promise<ToolResult<PrecheckRun[]>> {
-  const data = ProjectRunsResponseSchema.parse(
-    await callPrecheckRoute('GET', undefined, `?projectId=${encodeURIComponent(projectId)}`)
-  )
-  return {
-    toolId: 'site-analysis',
-    status: 'ok',
-    data: data.runs,
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: simulate async delay for demo feel
@@ -323,31 +231,4 @@ export async function listProjectPrecheckRuns(projectId: string): Promise<ToolRe
 // ─────────────────────────────────────────────────────────────────────────────
 function simulateDelay(ms = 800): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function callPrecheckRoute(
-  method: 'GET' | 'POST',
-  body?: Record<string, unknown>,
-  search = ''
-) {
-  const requestHeaders = await headers()
-  const host = requestHeaders.get('x-forwarded-host') ?? requestHeaders.get('host')
-  const protocol = requestHeaders.get('x-forwarded-proto') ?? 'http'
-
-  if (!host) {
-    throw new Error('Missing host header for precheck route')
-  }
-
-  const response = await fetch(`${protocol}://${host}/api/agents/precheck${search}`, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-    cache: 'no-store',
-  })
-
-  if (!response.ok) {
-    throw new Error(await response.text())
-  }
-
-  return response.json()
 }

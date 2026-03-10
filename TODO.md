@@ -1,3 +1,5 @@
+.venv\Scripts\Activate.ps1
+
 # Your personal setup checklist before starting any pass
 
 ## Do these once:

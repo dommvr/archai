@@ -19,9 +19,31 @@ class Settings(BaseSettings):
     # ── Supabase ──────────────────────────────────────────────
     supabase_url: str
     supabase_service_role_key: str
-    # Used to validate incoming Supabase JWTs from the Next.js frontend.
+
+    # ── JWT verification ──────────────────────────────────────
+    # Primary path (ES256 / RS256): no secret required — public keys are
+    # fetched from the JWKS endpoint derived from supabase_url.
+    #
+    # Override the JWKS URL if your setup uses a non-standard path:
+    #   SUPABASE_JWKS_URL=https://your-project.supabase.co/auth/v1/.well-known/jwks.json
+    supabase_jwks_url: str | None = None
+
+    # Legacy fallback (HS256): set this only if you still have tokens signed
+    # with the old shared-secret key and need a transition window.
+    # Leave unset on new deployments to hard-disable the HS256 path.
     # Find in: Supabase Dashboard → Settings → API → JWT Settings → JWT Secret
-    supabase_jwt_secret: str
+    supabase_jwt_secret: str | None = None
+
+    @property
+    def jwks_url(self) -> str:
+        """
+        Resolve the JWKS endpoint URL.
+        Uses the explicit override if set, otherwise derives from supabase_url.
+        Standard Supabase path: {project_url}/auth/v1/.well-known/jwks.json
+        """
+        if self.supabase_jwks_url:
+            return self.supabase_jwks_url
+        return f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
 
     # ── App ───────────────────────────────────────────────────
     app_frontend_url: str = "http://localhost:3000"
