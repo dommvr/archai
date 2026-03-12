@@ -1,41 +1,40 @@
-import { ViewerPanel } from '@/components/dashboard/ViewerPanel'
-import { ChatPanel } from '@/components/dashboard/ChatPanel'
-import { MetricsPanel } from '@/components/dashboard/MetricsPanel'
-import { Separator } from '@/components/ui/separator'
+import { redirect } from 'next/navigation'
+import { getSupabaseServerClient } from '@/lib/supabase/server'
 
 /**
- * Dashboard Home Page â€” the main workspace view.
+ * Dashboard root — smart redirect.
  *
- * Layout:
- *   Left: Full-height 3D viewer (Speckle mount point)
- *   Right: Live Metrics (top) + AI Copilot chat (bottom)
- *
- * The DashboardShell layout.tsx provides the outer shell
- * (topbar, sidebar, statusbar). This page renders the content area.
+ * Finds the user's most-recently-updated project and redirects to its
+ * project-scoped overview. If the user has no projects, renders an inline
+ * empty state so they can create one via the "New Project" Topbar button.
  */
-export default function DashboardPage() {
+export default async function DashboardPage() {
+  const supabase = await getSupabaseServerClient()
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (!user) redirect('/')
+
+  const { data: project } = await supabase
+    .from('projects')
+    .select('id')
+    .eq('user_id', user.id)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (project?.id) {
+    redirect(`/dashboard/projects/${project.id}`)
+  }
+
+  // No projects yet — rendered within the DashboardShell provided by layout.tsx
   return (
-    <div className="flex h-full">
-      {/* Main Viewer Area */}
-      <div className="flex-1 min-w-0 relative">
-        {/* SPECKLE VIEWER WILL BE MOUNTED HERE */}
-        <ViewerPanel />
+    <div className="flex h-full items-center justify-center">
+      <div className="text-center space-y-2">
+        <p className="text-sm text-muted-foreground">No projects yet.</p>
+        <p className="text-xs text-muted-foreground">
+          Use the <span className="font-medium text-white">New Project</span> button above to get started.
+        </p>
       </div>
-
-      {/* Right Panel: Metrics + Chat */}
-      <aside className="w-80 shrink-0 bg-archai-charcoal border-l border-archai-graphite flex flex-col overflow-hidden">
-        {/* Live Metrics â€” top portion */}
-        <div className="shrink-0 max-h-72 overflow-y-auto">
-          <MetricsPanel />
-        </div>
-
-        <Separator />
-
-        {/* AI Copilot Chat â€” bottom portion */}
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <ChatPanel />
-        </div>
-      </aside>
     </div>
   )
 }

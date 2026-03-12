@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   Dialog,
   DialogContent,
@@ -28,11 +29,11 @@ interface ToolEntry {
 
 const ALL_TOOLS: ToolEntry[] = [
   {
-    id: 'site-analysis',
-    label: 'Site Analysis & Zoning Checker',
+    id: 'precheck',
+    label: 'Zoning & Permit Check',
     description: 'Parse zoning codes, check compliance, pre-check permits',
     icon: Map,
-    href: '/dashboard/site-analysis',
+    href: '/dashboard/precheck',
     badge: 'Code Compliance',
   },
   {
@@ -115,6 +116,7 @@ interface CommandPaletteProps {
 }
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+  const router = useRouter()
   const [query, setQuery] = useState('')
 
   // Reset query when closed
@@ -180,9 +182,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   <button
                     key={tool.id}
                     onClick={() => {
-                      // READY FOR TOOL NAVIGATION INTEGRATION HERE
-                      console.log(`Launching tool: ${tool.id}`)
                       onOpenChange(false)
+                      router.push(tool.href)
                     }}
                     className={cn(
                       'w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left',

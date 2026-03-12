@@ -1,8 +1,13 @@
 import { redirect } from 'next/navigation'
 import { getSupabaseServerClient } from '@/lib/supabase/server'
-import { PrecheckWorkspace } from '@/components/dashboard/precheck/PrecheckWorkspace'
 
-export default async function PrecheckPage() {
+/**
+ * /dashboard/precheck — redirect shim.
+ *
+ * Keeps bookmarked or typed URLs working by forwarding to the correct
+ * project-scoped precheck route. If no project exists, falls back to /dashboard.
+ */
+export default async function PrecheckRedirectPage() {
   const supabase = await getSupabaseServerClient()
   const { data: { user } } = await supabase.auth.getUser()
 
@@ -16,14 +21,9 @@ export default async function PrecheckPage() {
     .limit(1)
     .maybeSingle()
 
-  return (
-    <PrecheckWorkspace
-      user={{
-        id:            user.id,
-        email:         user.email         ?? undefined,
-        user_metadata: user.user_metadata ?? undefined,
-      }}
-      projectId={project?.id ?? null}
-    />
-  )
+  if (project?.id) {
+    redirect(`/dashboard/projects/${project.id}/precheck`)
+  }
+
+  redirect('/dashboard')
 }

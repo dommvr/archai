@@ -315,6 +315,10 @@ async def sync_speckle_model(
 
     async def _task() -> None:
         try:
+            # Idempotency: remove any previous snapshot for this run before creating
+            # a new one. Prevents orphaned snapshots when the user re-syncs a model.
+            await repo.delete_snapshots_for_run(run_id)
+
             model_ref = await svc.create_speckle_model_ref(run.project_id, body)
             await repo.update_run_speckle_ref(run_id, model_ref.id)
 
@@ -323,8 +327,14 @@ async def sync_speckle_model(
             )
 
             updated_run = await repo.get_run(run_id)
+            # Fetch site context so derive_geometry_snapshot can compute FAR
+            # (FAR = GFA / parcel_area_m2; parcel area lives in site_context, not the model).
+            site_context = (
+                await repo.get_site_context(updated_run.site_context_id)
+                if updated_run and updated_run.site_context_id else None
+            )
             if updated_run:
-                await svc.derive_geometry_snapshot(updated_run, model_ref)
+                await svc.derive_geometry_snapshot(updated_run, model_ref, site_context)
 
             await pub.publish_run_status(run_id, PrecheckRunStatus.CREATED, "Model synced")
         except Exception as exc:
@@ -371,6 +381,15 @@ async def evaluate_compliance(
 
     async def _task() -> None:
         try:
+            # Idempotency: clear any evaluation data from a previous run of this
+            # endpoint. compliance_checks has a unique(run_id, rule_id) constraint,
+            # so re-evaluation without this cleanup would raise a constraint violation.
+            # Order: checklist → issues → checks (issues.check_id uses ON DELETE SET NULL,
+            # so deleting checks first is safe, but deleting issues first is cleaner).
+            await repo.delete_checklist_for_run(run_id)
+            await repo.delete_issues_for_run(run_id)
+            await repo.delete_checks_for_run(run_id)
+
             # ── Fetch context data ────────────────────────────
             site_context = (
                 await repo.get_site_context(run.site_context_id) if run.site_context_id else None

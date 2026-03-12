@@ -1,6 +1,6 @@
 'use client'
 
-import { usePathname } from 'next/navigation'
+import { usePathname, useParams } from 'next/navigation'
 import Link from 'next/link'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -21,7 +21,7 @@ type IconName = keyof typeof ICON_MAP
 
 const NAV_ITEMS: (NavItem & { iconName: IconName })[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard', iconName: 'LayoutDashboard', href: '/dashboard' },
-  { id: 'site-analysis', label: 'Site Analysis', icon: 'Map', iconName: 'Map', href: '/dashboard/site-analysis' },
+  { id: 'precheck', label: 'Zoning & Permit Check', icon: 'Map', iconName: 'Map', href: '/dashboard/precheck' },
   { id: 'massing-generator', label: 'Massing Generator', icon: 'Box', iconName: 'Box', href: '/dashboard/massing' },
   { id: 'space-planner', label: 'Space Planner', icon: 'Grid3x3', iconName: 'Grid3x3', href: '/dashboard/space-planner' },
   { id: 'live-metrics', label: 'Live Metrics', icon: 'Activity', iconName: 'Activity', href: '/dashboard/metrics' },
@@ -40,6 +40,23 @@ interface SidebarProps {
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname()
+  const params = useParams<{ projectId?: string }>()
+  const projectId = params.projectId ?? null
+
+  /**
+   * Compute the real href for each nav item.
+   * dashboard and precheck use project-scoped routes when a projectId is in the URL.
+   * All other items keep their static stub hrefs.
+   */
+  const computeHref = (item: (typeof NAV_ITEMS)[number]): string => {
+    if (item.id === 'dashboard') {
+      return projectId ? `/dashboard/projects/${projectId}` : '/dashboard'
+    }
+    if (item.id === 'precheck') {
+      return projectId ? `/dashboard/projects/${projectId}/precheck` : '/dashboard/precheck'
+    }
+    return item.href
+  }
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -53,13 +70,20 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         <div className="flex-1 py-3 space-y-0.5 overflow-y-auto overflow-x-hidden px-2">
           {NAV_ITEMS.map((item) => {
             const Icon = ICON_MAP[item.iconName]
-            const isActive = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href))
+            const href = computeHref(item)
+            // Dashboard: exact match only — startsWith would activate on all project sub-routes.
+            // All others: prefix match so nested pages keep the item highlighted.
+            const isActive =
+              item.id === 'dashboard'
+                ? pathname === href ||
+                  (projectId != null && pathname === `/dashboard/projects/${projectId}`)
+                : pathname === href || pathname.startsWith(href)
 
             return (
               <Tooltip key={item.id}>
                 <TooltipTrigger asChild>
                   <Link
-                    href={item.href}
+                    href={href}
                     className={cn(
                       'flex items-center gap-3 rounded-md px-2 py-2 text-xs transition-all duration-150 group',
                       isActive

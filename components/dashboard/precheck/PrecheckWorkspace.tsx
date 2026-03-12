@@ -29,6 +29,7 @@ import { ComplianceIssuesTable } from './ComplianceIssuesTable'
 import { ComplianceIssueDrawer } from './ComplianceIssueDrawer'
 import { PermitChecklistCard } from './PermitChecklistCard'
 import { PrecheckViewerPanel } from './PrecheckViewerPanel'
+import { ResizableVerticalSplit } from '@/components/ui/resizable-vertical-split'
 
 type Tab = 'setup' | 'issues' | 'checklist'
 
@@ -48,6 +49,7 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
   const [loadingRuns, setLoadingRuns] = useState(false)
   const [loadingDetails, setLoadingDetails] = useState(false)
   const [extracting, setExtracting] = useState(false)
+  const [syncingModel, setSyncingModel] = useState(false)
 
   // Ref that always reflects the current selectedRunId without closure staleness.
   // handleSelectRun and fetchProjectRuns read this instead of the closed-over
@@ -227,10 +229,15 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
   }
 
   async function handleSyncModel(input: SyncSpeckleModelInput) {
-    await precheckApi.syncSpeckleModel(input)
-    // SPECKLE VIEWER WILL BE MOUNTED HERE
-    if (selectedRunId) {
-      await refreshRunState(selectedRunId)
+    setSyncingModel(true)
+    try {
+      await precheckApi.syncSpeckleModel(input)
+      // SPECKLE VIEWER WILL BE MOUNTED HERE
+      if (selectedRunId) {
+        await refreshRunState(selectedRunId)
+      }
+    } finally {
+      setSyncingModel(false)
     }
   }
 
@@ -302,7 +309,10 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
   return (
     <div className="flex h-full">
       <div className="relative min-w-0 flex-1">
-        <PrecheckViewerPanel selectedIssue={selectedIssue} />
+        <PrecheckViewerPanel
+          selectedIssue={selectedIssue}
+          modelRef={currentRunDetails?.modelRef ?? null}
+        />
       </div>
 
       <aside className="flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-archai-graphite bg-archai-charcoal">
@@ -348,129 +358,146 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
         </div>
 
         {selectedRunId && (
-          <div className="shrink-0 space-y-3 border-b border-archai-graphite px-4 py-3">
-            <ReadinessScoreCard score={run?.readinessScore} isLoading={loadingDetails} />
-            <PrecheckProgressCard
-              run={run ?? selectedRun}
-              hasSiteContext={currentRunDetails?.siteContext != null}
-              hasDocuments={(currentRunDetails?.documents?.length ?? 0) > 0}
-              hasRules={(currentRunDetails?.rules?.length ?? 0) > 0}
-              hasModelRef={currentRunDetails?.modelRef != null}
-              isLoading={loadingDetails}
-            />
-          </div>
-        )}
+          <ResizableVerticalSplit
+            className="flex-1 min-h-0"
+            storageKey="precheck-right-split"
+            defaultTopPercent={38}
+            minTopPercent={20}
+            maxTopPercent={65}
+            topPanel={
+              <div className="h-full overflow-y-auto space-y-3 px-4 py-3">
+                <ReadinessScoreCard score={run?.readinessScore} isLoading={loadingDetails} />
+                <PrecheckProgressCard
+                  run={run ?? selectedRun}
+                  hasSiteContext={currentRunDetails?.siteContext != null}
+                  hasDocuments={(currentRunDetails?.documents?.length ?? 0) > 0}
+                  hasRules={(currentRunDetails?.rules?.length ?? 0) > 0}
+                  hasModelRef={currentRunDetails?.modelRef != null}
+                  hasGeometrySnapshot={currentRunDetails?.geometrySnapshot != null}
+                  isLoading={loadingDetails}
+                />
+              </div>
+            }
+            bottomPanel={
+              <>
+                <div className="flex shrink-0 border-b border-archai-graphite">
+                  {tabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={cn(
+                        'relative flex-1 py-2 text-xs font-medium transition-colors',
+                        activeTab === tab.id
+                          ? 'text-white after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[2px] after:bg-archai-orange'
+                          : 'text-muted-foreground hover:text-white',
+                      )}
+                    >
+                      {tab.label}
+                      {tab.count != null && (
+                        <span className="ml-1 rounded-full bg-archai-graphite px-1.5 text-[10px]">
+                          {tab.count}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
 
-        {selectedRunId && (
-          <>
-            <div className="flex shrink-0 border-b border-archai-graphite">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={cn(
-                    'relative flex-1 py-2 text-xs font-medium transition-colors',
-                    activeTab === tab.id
-                      ? 'text-white after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[2px] after:bg-archai-orange'
-                      : 'text-muted-foreground hover:text-white',
-                  )}
-                >
-                  {tab.label}
-                  {tab.count != null && (
-                    <span className="ml-1 rounded-full bg-archai-graphite px-1.5 text-[10px]">
-                      {tab.count}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-
-            <ScrollArea className="flex-1">
-              <div className="space-y-4 p-4">
-                {activeTab === 'setup' && (
-                  <>
-                    {!detailsReadyForSelectedRun ? (
-                      /*
-                        Skeleton shown whenever selectedRunId is set but details
-                        have not yet settled for THAT run. This prevents any
-                        possibility of showing a stale run's site context, a blank
-                        disabled form, or a double/stacked setup panel during
-                        transitions (run switching, new-run creation, or refresh).
-                      */
-                      <div className="space-y-4" aria-busy="true" aria-label="Loading run details">
-                        {[0, 1, 2].map((i) => (
-                          <div key={i} className="rounded-xl border border-archai-graphite bg-archai-charcoal p-4 space-y-3">
-                            <div className="h-4 w-32 rounded bg-archai-graphite animate-pulse" />
-                            <div className="h-3 w-full rounded bg-archai-graphite animate-pulse opacity-60" />
-                            <div className="h-3 w-3/4 rounded bg-archai-graphite animate-pulse opacity-40" />
-                            <div className="h-7 w-full rounded bg-archai-graphite animate-pulse opacity-50 mt-2" />
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      /*
-                        key={selectedRunId} forces a remount whenever the selected
-                        run changes, guaranteeing SiteContextForm's prefill effect
-                        fires with the new run's data and DocumentUploadPanel's
-                        pending state is cleared. Safe to mount here because
-                        detailsReadyForSelectedRun already guarantees the details
-                        belong to selectedRunId.
-                      */
+                <ScrollArea className="flex-1">
+                  <div className="space-y-4 p-4">
+                    {activeTab === 'setup' && (
                       <>
-                        <SiteContextForm
-                          key={selectedRunId}
-                          runId={selectedRunId}
-                          onSubmit={handleIngestSite}
-                          siteContext={currentRunDetails?.siteContext}
-                          isLoading={false}
-                        />
-                        <DocumentUploadPanel
-                          key={selectedRunId}
-                          runId={selectedRunId}
-                          onDocumentsReady={handleIngestDocuments}
-                          existingDocuments={currentRunDetails?.documents ?? []}
-                          onDeleteDocument={handleDeleteDocument}
-                          isLoading={false}
-                        />
-                        <RuleExtractionStatusCard
-                          runId={selectedRunId}
-                          rules={rules}
-                          canExtract
-                          onExtract={handleExtractRules}
-                          isExtracting={extracting}
-                        />
-                        <SpeckleModelPicker runId={selectedRunId} onSync={handleSyncModel} />
+                        {!detailsReadyForSelectedRun ? (
+                          /*
+                            Skeleton shown whenever selectedRunId is set but details
+                            have not yet settled for THAT run. This prevents any
+                            possibility of showing a stale run's site context, a blank
+                            disabled form, or a double/stacked setup panel during
+                            transitions (run switching, new-run creation, or refresh).
+                          */
+                          <div className="space-y-4" aria-busy="true" aria-label="Loading run details">
+                            {[0, 1, 2].map((i) => (
+                              <div key={i} className="rounded-xl border border-archai-graphite bg-archai-charcoal p-4 space-y-3">
+                                <div className="h-4 w-32 rounded bg-archai-graphite animate-pulse" />
+                                <div className="h-3 w-full rounded bg-archai-graphite animate-pulse opacity-60" />
+                                <div className="h-3 w-3/4 rounded bg-archai-graphite animate-pulse opacity-40" />
+                                <div className="h-7 w-full rounded bg-archai-graphite animate-pulse opacity-50 mt-2" />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          /*
+                            key={selectedRunId} forces a remount whenever the selected
+                            run changes, guaranteeing SiteContextForm's prefill effect
+                            fires with the new run's data and DocumentUploadPanel's
+                            pending state is cleared. Safe to mount here because
+                            detailsReadyForSelectedRun already guarantees the details
+                            belong to selectedRunId.
+                          */
+                          <>
+                            <SiteContextForm
+                              key={selectedRunId}
+                              runId={selectedRunId}
+                              onSubmit={handleIngestSite}
+                              siteContext={currentRunDetails?.siteContext}
+                              isLoading={false}
+                            />
+                            <DocumentUploadPanel
+                              key={selectedRunId}
+                              runId={selectedRunId}
+                              onDocumentsReady={handleIngestDocuments}
+                              existingDocuments={currentRunDetails?.documents ?? []}
+                              onDeleteDocument={handleDeleteDocument}
+                              isLoading={false}
+                            />
+                            <RuleExtractionStatusCard
+                              runId={selectedRunId}
+                              rules={rules}
+                              canExtract
+                              onExtract={handleExtractRules}
+                              isExtracting={extracting}
+                            />
+                            <SpeckleModelPicker
+                              key={selectedRunId}
+                              runId={selectedRunId}
+                              onSync={handleSyncModel}
+                              modelRef={currentRunDetails?.modelRef}
+                              geometrySnapshot={currentRunDetails?.geometrySnapshot}
+                              run={run}
+                              isLoading={syncingModel}
+                            />
 
-                        <Separator />
+                            <Separator />
 
-                        <Button
-                          variant="archai"
-                          size="sm"
-                          className="w-full"
-                          onClick={() => void handleEvaluate()}
-                          disabled={run?.status === 'completed'}
-                        >
-                          Run Compliance Check
-                        </Button>
+                            <Button
+                              variant="archai"
+                              size="sm"
+                              className="w-full"
+                              onClick={() => void handleEvaluate()}
+                              disabled={run?.status === 'completed'}
+                            >
+                              Run Compliance Check
+                            </Button>
+                          </>
+                        )}
                       </>
                     )}
-                  </>
-                )}
 
-                {activeTab === 'issues' && (
-                  <ComplianceIssuesTable
-                    issues={issues}
-                    onSelectIssue={handleSelectIssue}
-                    isLoading={loadingDetails}
-                  />
-                )}
+                    {activeTab === 'issues' && (
+                      <ComplianceIssuesTable
+                        issues={issues}
+                        onSelectIssue={handleSelectIssue}
+                        isLoading={loadingDetails}
+                      />
+                    )}
 
-                {activeTab === 'checklist' && (
-                  <PermitChecklistCard items={checklist} isLoading={loadingDetails} />
-                )}
-              </div>
-            </ScrollArea>
-          </>
+                    {activeTab === 'checklist' && (
+                      <PermitChecklistCard items={checklist} isLoading={loadingDetails} />
+                    )}
+                  </div>
+                </ScrollArea>
+              </>
+            }
+          />
         )}
 
         {!selectedRunId && (

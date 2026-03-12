@@ -36,10 +36,10 @@ export async function runSiteAnalysis(projectId: string, payload?: ToolPayload):
   // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
   await simulateDelay()
   return {
-    toolId: 'site-analysis',
+    toolId: 'precheck',
     status: 'ok',
     data: null,
-    message: 'Site Analysis stub — not yet implemented',
+    message: 'Zoning & Permit Check stub — not yet implemented',
   }
 }
 

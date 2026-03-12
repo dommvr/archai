@@ -4,7 +4,7 @@
 
 export type ToolId =
   | 'dashboard'
-  | 'site-analysis'
+  | 'precheck'
   | 'massing-generator'
   | 'space-planner'
   | 'live-metrics'
@@ -26,12 +26,15 @@ export interface NavItem {
 export interface Project {
   id: string
   name: string
-  description?: string
   createdAt: string
   updatedAt: string
   userId: string
   speckleStreamId?: string
 }
+
+export type ProjectDeleteResult =
+  | { success: true }
+  | { success: false; error: string }
 
 export interface Metrics {
   gfa: number       // Gross Floor Area in m²

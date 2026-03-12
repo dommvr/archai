@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation'
 import { getSupabaseServerClient } from '@/lib/supabase/server'
 import { DashboardShell } from '@/components/dashboard/DashboardShell'
+import { getProjects } from '@/lib/actions/projects'
 import type { AuthUser } from '@/types'
 
 /**
@@ -9,6 +10,9 @@ import type { AuthUser } from '@/types'
  * Secondary auth protection (primary is middleware.ts).
  * Fetches the authenticated user server-side so it can be passed
  * to DashboardShell → UserContext without client-side waterfall.
+ *
+ * Also fetches the user's projects so the Topbar project switcher
+ * can be initialised with real data.
  *
  * IMPORTANT: Uses getUser() not getSession() — getUser() validates the JWT
  * via a network call to Supabase, ensuring token hasn't been revoked.
@@ -31,8 +35,10 @@ export default async function DashboardLayout({
     user_metadata: user.user_metadata as Record<string, unknown>,
   }
 
+  const { projects } = await getProjects()
+
   return (
-    <DashboardShell user={authUser}>
+    <DashboardShell user={authUser} initialProjects={projects}>
       {children}
     </DashboardShell>
   )
