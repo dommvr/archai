@@ -7,6 +7,7 @@ import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 import * as precheckApi from '@/lib/precheck/api'
+import { getSupabaseBrowserClient } from '@/lib/supabase/client'
 import type {
   ComplianceIssue,
   ExtractedRule,
@@ -156,10 +157,82 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     ])
   }, [fetchProjectRuns, fetchRunDetails])
 
+  // Silent refresh: updates runDetails and the run in the runs list without
+  // showing a loading skeleton. Used by the sync poller below so the UI stays
+  // populated while background processing is in progress.
+  const refreshRunDetailsSilent = useCallback(async (runId: string) => {
+    runDetailsAbortRef.current?.abort()
+    const controller = new AbortController()
+    runDetailsAbortRef.current = controller
+    const requestId = ++runDetailsRequestIdRef.current
+    try {
+      const details = await precheckApi.getRunDetails(runId, { signal: controller.signal })
+      if (runDetailsRequestIdRef.current !== requestId) return
+      setRunDetails(details)
+      // Keep the runs list status badge in sync so it updates without a full refetch.
+      setRuns((prev) => prev.map((r) => (r.id === runId ? details.run : r)))
+    } catch (err) {
+      if (controller.signal.aborted || runDetailsRequestIdRef.current !== requestId) return
+      console.error('[PrecheckWorkspace] Background poll failed:', err)
+    } finally {
+      if (runDetailsRequestIdRef.current === requestId) {
+        runDetailsAbortRef.current = null
+      }
+    }
+  }, [])
+
   // Keep the ref in sync with the state so that callbacks reading
   // selectedRunIdRef.current always see the latest committed value.
   useEffect(() => {
     selectedRunIdRef.current = selectedRunId
+  }, [selectedRunId])
+
+  // Realtime subscription: listen for precheck_runs UPDATE events for the
+  // selected run. Replaces the 2s polling interval. The subscription is
+  // torn down and re-established whenever the selected run changes.
+  //
+  // payload.new uses snake_case DB column names — map to camelCase manually
+  // because PrecheckRunSchema expects camelCase (as returned by FastAPI).
+  useEffect(() => {
+    if (!selectedRunId) return
+
+    const supabase = getSupabaseBrowserClient()
+    const channel = supabase
+      .channel(`precheck-run-${selectedRunId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'precheck_runs',
+          filter: `id=eq.${selectedRunId}`,
+        },
+        (payload) => {
+          const raw = payload.new as Record<string, unknown>
+          const patch: Partial<PrecheckRun> = {
+            status:             raw['status']               as PrecheckRun['status'],
+            readinessScore:     raw['readiness_score']      as number | null | undefined,
+            currentStep:        raw['current_step']         as string | null | undefined,
+            errorMessage:       raw['error_message']        as string | null | undefined,
+            siteContextId:      raw['site_context_id']      as string | null | undefined,
+            speckleModelRefId:  raw['speckle_model_ref_id'] as string | null | undefined,
+            updatedAt:          raw['updated_at']           as string,
+          }
+          setRuns((prev) =>
+            prev.map((r) => (r.id === selectedRunId ? { ...r, ...patch } : r))
+          )
+          setRunDetails((prev) =>
+            prev && prev.run.id === selectedRunId
+              ? { ...prev, run: { ...prev.run, ...patch } }
+              : prev
+          )
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
   }, [selectedRunId])
 
   useEffect(() => {
@@ -187,6 +260,25 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
       runDetailsAbortRef.current?.abort()
     }
   }, [])
+
+  // Poll run details while the backend is actively processing a model sync.
+  // Activates when the selected run's status is syncing_model or computing_metrics.
+  // Stops automatically when the status transitions to any other value (including
+  // created / failed / completed), or when the selected run changes or the
+  // component unmounts. The interval cleanup in the return ensures no timer leaks.
+  const pollingRunStatus =
+    runDetails?.run.id === selectedRunId ? (runDetails?.run.status ?? null) : null
+
+  useEffect(() => {
+    if (!selectedRunId) return
+    if (pollingRunStatus !== 'syncing_model' && pollingRunStatus !== 'computing_metrics') return
+
+    const id = setInterval(() => {
+      void refreshRunDetailsSilent(selectedRunId)
+    }, 2000)
+
+    return () => clearInterval(id)
+  }, [selectedRunId, pollingRunStatus, refreshRunDetailsSilent])
 
   async function handleCreateRun(pid: string, uid: string) {
     const run = await precheckApi.createPrecheckRun({ projectId: pid, createdBy: uid })
@@ -463,7 +555,11 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
                               modelRef={currentRunDetails?.modelRef}
                               geometrySnapshot={currentRunDetails?.geometrySnapshot}
                               run={run}
-                              isLoading={syncingModel}
+                              isLoading={
+                                syncingModel ||
+                                run?.status === 'syncing_model' ||
+                                run?.status === 'computing_metrics'
+                              }
                             />
 
                             <Separator />

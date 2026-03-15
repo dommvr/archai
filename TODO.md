@@ -545,3 +545,18 @@ Acceptance criteria:
 - Clicking an issue updates highlighted object state
 - Access model is explicit and not hand-wavy
 - A developer can follow the happy-path checklist and verify Tool 1 end-to-end
+
+
+# Settings
+Auth gating on /settings/*	[Real — middleware + server component protection]
+User email / name display	[Real — from Supabase auth.getUser()]
+Speckle connection test	[Simulated — // TODO: GET {server}/api/others/user?token={token}]
+Profile save (company, role, etc.) [Simulated — // TODO: wire to Supabase user_metadata or profiles table]
+Notification toggles [Simulated — ready for backend wiring]
+Password change dialog [Simulated — // TODO: supabase.auth.updateUser({ password })]
+Active sessions	[Demo data — marked with Demo badge]
+Security activity log	[Demo data — marked with Demo badge]
+Billing plan / invoices / payment	[Demo data — marked with Demo badge]
+Usage quota bars [Demo data — marked with Demo badge]
+Preferences (save) [Simulated — // TODO: persist to user_metadata/preferences table]
+Team section [Coming Soon — banner + grayed-out structure]

@@ -55,6 +55,14 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
     return NextResponse.redirect(redirectUrl)
   }
 
+  // Protect /settings and all sub-routes
+  if (pathname.startsWith('/settings') && !user) {
+    const redirectUrl = request.nextUrl.clone()
+    redirectUrl.pathname = '/'
+    redirectUrl.searchParams.set('authRequired', '1')
+    return NextResponse.redirect(redirectUrl)
+  }
+
   // Redirect authenticated users away from the landing page to the dashboard
   if (pathname === '/' && user) {
     const redirectUrl = request.nextUrl.clone()

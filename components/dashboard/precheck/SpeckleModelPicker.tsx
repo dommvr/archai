@@ -92,6 +92,17 @@ export function SpeckleModelPicker({
         const hasMetrics  = metricCount !== null && metricCount > 0
         const noMetrics   = metricCount === 0
 
+        // Unit normalization note — present when the backend converted units
+        // (declared or heuristic). Stored in rawMetrics by the Python pipeline.
+        const unitNorm = geometrySnapshot?.rawMetrics?.unit_normalization as
+          | { length_conversion_applied?: boolean; heuristic_applied?: boolean;
+              resolved_length_units?: string; plausibility_warnings?: string[] }
+          | null | undefined
+        const unitConverted   = Boolean(unitNorm?.length_conversion_applied)
+        const unitHeuristic   = Boolean(unitNorm?.heuristic_applied)
+        const resolvedUnit    = unitNorm?.resolved_length_units ?? null
+        const unitWarnings    = unitNorm?.plausibility_warnings ?? []
+
         const statusLabel =
           isSyncing   ? 'syncing…' :
           syncFailed  ? 'sync failed' :
@@ -151,6 +162,18 @@ export function SpeckleModelPicker({
                 <p className="text-[10px] text-archai-amber/70 mt-0.5">
                   No geometry metrics extracted. Check SPECKLE_TOKEN is set and
                   the model contains typed floor/wall elements.
+                </p>
+              )}
+              {/* Unit conversion note — shown when the pipeline normalised units */}
+              {hasMetrics && unitConverted && !unitWarnings.length && (
+                <p className="text-[10px] text-sky-400/70 mt-0.5">
+                  Units normalised: {resolvedUnit} → m
+                  {unitHeuristic ? ' (heuristic — verify source model units)' : ''}
+                </p>
+              )}
+              {hasMetrics && unitWarnings.length > 0 && (
+                <p className="text-[10px] text-archai-amber/80 mt-0.5">
+                  Unit note: {unitWarnings[0]}
                 </p>
               )}
             </div>

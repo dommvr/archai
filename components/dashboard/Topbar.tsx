@@ -26,11 +26,11 @@ import {
   ChevronDown,
   Plus,
   LogOut,
-  Settings,
-  User,
+  CreditCard,
   FolderOpen,
   Loader2,
   Trash2,
+  UserCog,
 } from 'lucide-react'
 import { signOut } from '@/lib/actions/auth'
 import { createProject, deleteProject } from '@/lib/actions/projects'
@@ -274,13 +274,13 @@ export function Topbar({ onAddTool }: TopbarProps) {
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>
-              <User className="h-3.5 w-3.5" />
-              Profile
+            <DropdownMenuItem onClick={() => router.push('/settings/account')}>
+              <UserCog className="h-3.5 w-3.5" />
+              Account &amp; Settings
             </DropdownMenuItem>
-            <DropdownMenuItem>
-              <Settings className="h-3.5 w-3.5" />
-              Settings
+            <DropdownMenuItem onClick={() => router.push('/settings/billing')}>
+              <CreditCard className="h-3.5 w-3.5" />
+              Billing
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
