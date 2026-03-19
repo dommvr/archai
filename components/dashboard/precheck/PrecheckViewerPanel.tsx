@@ -92,7 +92,19 @@ export function PrecheckViewerPanel({ selectedIssue, modelRef }: PrecheckViewerP
 
   useEffect(() => {
     if (!modelRef || !speckleServerUrl || !viewerContainerRef.current) {
+      // When modelRef is cleared (e.g. new run with no synced model yet), dispose
+      // any stale viewer so the canvas and the empty-state message agree.
+      if (viewerInstanceRef.current) {
+        try { viewerInstanceRef.current.dispose?.() } catch { /* ignore */ }
+        viewerInstanceRef.current = null
+      }
+      if (viewerContainerRef.current) {
+        viewerContainerRef.current.innerHTML = ''
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(window as any).__speckleViewer = null
       setViewerState('idle')
+      setViewerError(null)
       return
     }
 
@@ -104,7 +116,9 @@ export function PrecheckViewerPanel({ selectedIssue, modelRef }: PrecheckViewerP
 
       try {
         // Dynamic import keeps the heavy renderer out of the SSR bundle.
-        const { Viewer, DefaultViewerParams, SpeckleLoader, CameraController } =
+        // LegacyViewer extends Viewer and bundles CameraController, SelectionExtension,
+        // filtering, and highlight extensions — required for highlightObjects() API.
+        const { LegacyViewer, DefaultViewerParams, SpeckleLoader } =
           await import('@speckle/viewer')
 
         if (cancelled || !viewerContainerRef.current) return
@@ -114,10 +128,12 @@ export function PrecheckViewerPanel({ selectedIssue, modelRef }: PrecheckViewerP
           try { viewerInstanceRef.current.dispose?.() } catch { /* ignore */ }
           viewerInstanceRef.current = null
           viewerContainerRef.current.innerHTML = ''
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(window as any).__speckleViewer = null
         }
 
         console.debug('[PrecheckViewerPanel] Initialising viewer...')
-        const viewer = new Viewer(viewerContainerRef.current, {
+        const viewer = new LegacyViewer(viewerContainerRef.current, {
           ...DefaultViewerParams,
           showStats: false,
           verbose: false,
@@ -127,7 +143,10 @@ export function PrecheckViewerPanel({ selectedIssue, modelRef }: PrecheckViewerP
         console.debug('[PrecheckViewerPanel] Viewer initialised.')
 
         viewerInstanceRef.current = viewer
-        viewer.createExtension(CameraController)
+        // Expose for ViewerAnnotationController — issue highlight calls read this ref.
+        // LegacyViewer registers CameraController internally; do NOT call createExtension again.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__speckleViewer = viewer
 
         const base = speckleServerUrl!.replace(/\/$/, '')
 
@@ -178,7 +197,12 @@ export function PrecheckViewerPanel({ selectedIssue, modelRef }: PrecheckViewerP
         await viewer.loadObject(loader, /* zoomToObject */ true)
         console.debug('[PrecheckViewerPanel] Model loaded successfully.')
 
-        if (!cancelled) setViewerState('ready')
+        if (cancelled) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(window as any).__speckleViewer = null
+          return
+        }
+        setViewerState('ready')
       } catch (err) {
         if (cancelled) return
         const msg = err instanceof Error ? err.message : String(err)
@@ -208,6 +232,8 @@ export function PrecheckViewerPanel({ selectedIssue, modelRef }: PrecheckViewerP
         try { viewerInstanceRef.current.dispose?.() } catch { /* ignore */ }
         viewerInstanceRef.current = null
       }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(window as any).__speckleViewer = null
     }
   }, [])
 

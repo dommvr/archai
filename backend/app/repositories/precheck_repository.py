@@ -60,9 +60,10 @@ class PrecheckRepository:
         self,
         project_id: UUID,
         created_by: UUID,
+        name: str | None = None,
     ) -> PrecheckRun:
         now = datetime.now(timezone.utc).isoformat()
-        data = {
+        data: dict[str, Any] = {
             "id":         str(uuid4()),
             "project_id": str(project_id),
             "created_by": str(created_by),
@@ -70,6 +71,8 @@ class PrecheckRepository:
             "created_at": now,
             "updated_at": now,
         }
+        if name is not None:
+            data["name"] = name
         result = await self._db.table("precheck_runs").insert(data).execute()
         return PrecheckRun.model_validate(result.data[0])
 

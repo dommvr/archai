@@ -79,8 +79,10 @@ export function PrecheckRunsList({ runs, selectedRunId, onSelect, isLoading, onD
               className="flex-1 min-w-0 text-left px-3 py-2.5"
             >
               <div className="flex items-center gap-2">
-                <span className="flex-1 text-xs text-white font-mono truncate">
-                  {run.id.slice(0, 8)}…
+                <span className="flex-1 text-xs text-white truncate">
+                  {run.name ?? (
+                    <span className="font-mono text-muted-foreground">{run.id.slice(0, 8)}…</span>
+                  )}
                 </span>
                 <span className={cn('text-[10px] font-medium rounded-full px-1.5 py-0.5', statusColor(run.status))}>
                   {run.status.replace(/_/g, ' ')}

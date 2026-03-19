@@ -22,7 +22,7 @@ const STEPS: Step[] = [
 
 const STATUS_ORDER: PrecheckRunStatus[] = [
   'created', 'ingesting_site', 'ingesting_docs', 'extracting_rules',
-  'syncing_model', 'computing_metrics', 'evaluating', 'generating_report',
+  'syncing_model', 'computing_metrics', 'synced', 'evaluating', 'generating_report',
   'completed', 'failed',
 ]
 
@@ -66,9 +66,14 @@ function resolveStepState(
     case 'syncing_model':
       return overrides.hasModelRef           ? 'done' : runStatus === step ? 'active' : 'idle'
     case 'computing_metrics':
-      // Data presence wins: once a geometry snapshot exists the step is permanently done,
-      // regardless of the current run status (which returns to 'created' after sync).
-      return overrides.hasGeometrySnapshot   ? 'done' : runStatus === step ? 'active' : 'idle'
+      // Data presence wins: once a geometry snapshot exists the step is permanently done.
+      // Show active during both syncing_model and computing_metrics phases so the user
+      // sees a loading indicator for the full sync pipeline, not just the final sub-step.
+      return overrides.hasGeometrySnapshot
+        ? 'done'
+        : (runStatus === 'computing_metrics' || runStatus === 'syncing_model')
+          ? 'active'
+          : 'idle'
   }
 
   // Pipeline steps: driven by run status position.

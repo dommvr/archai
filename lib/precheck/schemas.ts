@@ -208,6 +208,7 @@ export const PermitChecklistItemSchema = z.object({
 export const PrecheckRunSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
+  name: z.string().nullable().optional(),
   siteContextId: z.string().uuid().nullable().optional(),
   speckleModelRefId: z.string().uuid().nullable().optional(),
   status: z.enum(PRECHECK_RUN_STATUSES),
@@ -222,6 +223,7 @@ export const PrecheckRunSchema = z.object({
 export const CreatePrecheckRunInputSchema = z.object({
   projectId: z.string().uuid(),
   createdBy: z.string().uuid(),
+  name: z.string().optional(),
 })
 
 export const IngestSiteInputSchema = z.object({

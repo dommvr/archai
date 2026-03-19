@@ -46,6 +46,7 @@ class PrecheckRunStatus(str, Enum):
     EXTRACTING_RULES  = "extracting_rules"
     SYNCING_MODEL     = "syncing_model"
     COMPUTING_METRICS = "computing_metrics"
+    SYNCED            = "synced"
     EVALUATING        = "evaluating"
     GENERATING_REPORT = "generating_report"
     COMPLETED         = "completed"
@@ -297,6 +298,7 @@ class PermitChecklistItem(BaseSchema):
 class PrecheckRun(BaseSchema):
     id: UUID
     project_id: UUID
+    name: str | None = None
     site_context_id: UUID | None = None
     speckle_model_ref_id: UUID | None = None
     status: PrecheckRunStatus = PrecheckRunStatus.CREATED
@@ -323,6 +325,7 @@ class ManualSiteOverrides(BaseSchema):
 class CreatePrecheckRunRequest(BaseSchema):
     """POST /precheck/runs — maps to CreatePrecheckRunInputSchema in TS."""
     project_id: UUID
+    name: str | None = None
     # created_by is injected from the validated JWT, not from request body
 
 

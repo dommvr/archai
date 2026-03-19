@@ -138,6 +138,15 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     try {
       const details = await precheckApi.getRunDetails(runId, { signal: controller.signal })
       if (runDetailsRequestIdRef.current !== requestId) return
+      // DEBUG — remove once realtime behaviour is confirmed
+      console.log('[fetchRunDetails] settled', {
+        runId,
+        status: details.run.status,
+        hasModelRef: !!details.modelRef,
+        hasSnapshot: !!details.geometrySnapshot,
+        requestId,
+        currentRequestId: runDetailsRequestIdRef.current,
+      })
       setRunDetails(details)
     } catch (err) {
       if (controller.signal.aborted || runDetailsRequestIdRef.current !== requestId) return
@@ -157,29 +166,6 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     ])
   }, [fetchProjectRuns, fetchRunDetails])
 
-  // Silent refresh: updates runDetails and the run in the runs list without
-  // showing a loading skeleton. Used by the sync poller below so the UI stays
-  // populated while background processing is in progress.
-  const refreshRunDetailsSilent = useCallback(async (runId: string) => {
-    runDetailsAbortRef.current?.abort()
-    const controller = new AbortController()
-    runDetailsAbortRef.current = controller
-    const requestId = ++runDetailsRequestIdRef.current
-    try {
-      const details = await precheckApi.getRunDetails(runId, { signal: controller.signal })
-      if (runDetailsRequestIdRef.current !== requestId) return
-      setRunDetails(details)
-      // Keep the runs list status badge in sync so it updates without a full refetch.
-      setRuns((prev) => prev.map((r) => (r.id === runId ? details.run : r)))
-    } catch (err) {
-      if (controller.signal.aborted || runDetailsRequestIdRef.current !== requestId) return
-      console.error('[PrecheckWorkspace] Background poll failed:', err)
-    } finally {
-      if (runDetailsRequestIdRef.current === requestId) {
-        runDetailsAbortRef.current = null
-      }
-    }
-  }, [])
 
   // Keep the ref in sync with the state so that callbacks reading
   // selectedRunIdRef.current always see the latest committed value.
@@ -207,8 +193,16 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
           table: 'precheck_runs',
           filter: `id=eq.${selectedRunId}`,
         },
-        (payload) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (payload: any) => {
           const raw = payload.new as Record<string, unknown>
+          // DEBUG — remove once realtime behaviour is confirmed
+          console.log('[RT:precheck] callback fired', {
+            payloadId: raw['id'],
+            payloadStatus: raw['status'],
+            selectedRunId,
+            match: raw['id'] === selectedRunId,
+          })
           const patch: Partial<PrecheckRun> = {
             status:             raw['status']               as PrecheckRun['status'],
             readinessScore:     raw['readiness_score']      as number | null | undefined,
@@ -221,19 +215,39 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
           setRuns((prev) =>
             prev.map((r) => (r.id === selectedRunId ? { ...r, ...patch } : r))
           )
-          setRunDetails((prev) =>
-            prev && prev.run.id === selectedRunId
+          setRunDetails((prev) => {
+            // DEBUG — remove once realtime behaviour is confirmed
+            console.log('[RT:precheck] setRunDetails updater', {
+              prevNull: prev === null,
+              prevRunId: prev?.run.id,
+              selectedRunId,
+              patchStatus: patch.status,
+            })
+            return prev && prev.run.id === selectedRunId
               ? { ...prev, run: { ...prev.run, ...patch } }
               : prev
-          )
+          })
+          // The partial patch updates run.status immediately (clearing the
+          // in-progress spinner) but leaves joined data (modelRef,
+          // geometrySnapshot) stale. When the run reaches a terminal state,
+          // re-fetch the full run details so the viewer can mount and
+          // SpeckleModelPicker shows the synced confirmation.
+          if (patch.status === 'synced' || patch.status === 'completed' || patch.status === 'failed') {
+            // DEBUG — remove once realtime behaviour is confirmed
+            console.log('[RT:precheck] triggering fetchRunDetails for status:', patch.status)
+            void fetchRunDetails(selectedRunId)
+          }
         }
       )
-      .subscribe()
+      .subscribe((status: string, err?: Error) => {
+        // DEBUG — remove once realtime behaviour is confirmed
+        console.log('[RT:precheck] subscribe status:', status, err ?? '')
+      })
 
     return () => {
       void supabase.removeChannel(channel)
     }
-  }, [selectedRunId])
+  }, [selectedRunId, fetchRunDetails])
 
   useEffect(() => {
     if (!projectId) {
@@ -261,27 +275,9 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     }
   }, [])
 
-  // Poll run details while the backend is actively processing a model sync.
-  // Activates when the selected run's status is syncing_model or computing_metrics.
-  // Stops automatically when the status transitions to any other value (including
-  // created / failed / completed), or when the selected run changes or the
-  // component unmounts. The interval cleanup in the return ensures no timer leaks.
-  const pollingRunStatus =
-    runDetails?.run.id === selectedRunId ? (runDetails?.run.status ?? null) : null
 
-  useEffect(() => {
-    if (!selectedRunId) return
-    if (pollingRunStatus !== 'syncing_model' && pollingRunStatus !== 'computing_metrics') return
-
-    const id = setInterval(() => {
-      void refreshRunDetailsSilent(selectedRunId)
-    }, 2000)
-
-    return () => clearInterval(id)
-  }, [selectedRunId, pollingRunStatus, refreshRunDetailsSilent])
-
-  async function handleCreateRun(pid: string, uid: string) {
-    const run = await precheckApi.createPrecheckRun({ projectId: pid, createdBy: uid })
+  async function handleCreateRun(pid: string, uid: string, name: string | undefined) {
+    const run = await precheckApi.createPrecheckRun({ projectId: pid, createdBy: uid, name })
     setActiveTab('setup')
     // refreshRunState calls fetchProjectRuns(run.id) which internally calls
     // handleSelectRun(run.id) — that is sufficient. Do NOT call handleSelectRun
@@ -454,8 +450,8 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
             className="flex-1 min-h-0"
             storageKey="precheck-right-split"
             defaultTopPercent={38}
-            minTopPercent={20}
-            maxTopPercent={65}
+            minTopPercent={15}
+            maxTopPercent={80}
             topPanel={
               <div className="h-full overflow-y-auto space-y-3 px-4 py-3">
                 <ReadinessScoreCard score={run?.readinessScore} isLoading={loadingDetails} />

@@ -261,8 +261,76 @@ def _normalize_ifc_type(raw: Any) -> str | None:
 
 
 # ════════════════════════════════════════════════════════════
-# PUBLIC ENTRY POINT
+# PUBLIC ENTRY POINTS
 # ════════════════════════════════════════════════════════════
+
+def collect_deduped_storeys(
+    elements: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, str, int]:
+    """
+    Scans the flat element pool and returns the canonical set of
+    IfcBuildingStorey element dicts, deduplicated by the best available
+    identifier (id > globalId > name+elevation > python id).
+
+    This is the same logic used by _apply_storey_height_heuristic to count
+    distinct storeys, extracted here so the same deduped records can be used
+    to create storey_elevation height candidates in _normalize_elements.
+
+    Returns
+    -------
+    (deduped_elements, raw_count, dedup_method_str, malformed_skipped)
+        deduped_elements  — one dict per unique storey, in first-seen order
+        raw_count         — total storey-type matches before dedup
+        dedup_method_str  — comma-joined dedup methods actually used
+        malformed_skipped — elements whose IFC type could not be parsed
+    """
+    storey_ifc_classes = frozenset({
+        "ifcbuildingstorey", "ifcstorey", "ifcbuildingstory",
+    })
+    seen_keys: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    raw_count = 0
+    malformed_skipped = 0
+    dedup_methods_used: list[str] = []
+
+    for e in elements:
+        raw_type = e.get("ifcType") or e.get("type")
+        normalised = _normalize_ifc_type(raw_type)
+        if normalised is None:
+            malformed_skipped += 1
+            continue
+        if normalised not in storey_ifc_classes:
+            continue
+
+        raw_count += 1
+
+        obj_id    = str(e.get("id")       or "").strip()
+        global_id = str(e.get("globalId") or e.get("applicationId") or "").strip()
+        name      = str(e.get("name")     or "").strip()
+        elevation = e.get("elevation")
+
+        if obj_id:
+            dedup_key = f"id:{obj_id}"
+            method = "object_id"
+        elif global_id:
+            dedup_key = f"gid:{global_id}"
+            method = "global_id"
+        elif name:
+            dedup_key = f"name:{name}:elev:{elevation}"
+            method = "name+elevation"
+        else:
+            dedup_key = f"pyid:{id(e)}"
+            method = "python_id_fallback"
+
+        if dedup_key not in seen_keys:
+            seen_keys.add(dedup_key)
+            deduped.append(e)
+        if method not in dedup_methods_used:
+            dedup_methods_used.append(method)
+
+    dedup_method_str = ", ".join(dedup_methods_used) if dedup_methods_used else "none"
+    return deduped, raw_count, dedup_method_str, malformed_skipped
+
 
 def detect_and_normalize_units(
     candidates: "NormalizedCandidates",
@@ -445,99 +513,183 @@ def _apply_declared_unit_conversion(
     )
 
 
+def _apply_heuristic_conversion(
+    candidates: "NormalizedCandidates",
+    ifc_gen_heights: "list",
+    report: UnitNormalizationReport,
+    *,
+    length_factor: float,
+    area_factor: float,
+    resolved_length: str,
+    resolved_area: str,
+    unit_label_h: str,
+    unit_label_a: str,
+    detail: str,
+    implied_storey_h_m: float,
+    max_h: float,
+    guard_area_plausibility: bool = False,
+) -> None:
+    """
+    Shared conversion logic for both ft→m and mm→m storey-height heuristics.
+
+    Mutates candidates in-place, records before/after snapshots and a
+    plausibility warning in the report.
+
+    Parameters
+    ----------
+    guard_area_plausibility : bool
+        When True (mm→m case), area conversion is skipped if any IFC/generic
+        area candidate already has a value in the plausible m² range (>= 1.0).
+        This is necessary because IFC quantity set areas (BaseQuantities.GrossArea
+        etc.) are stored in m² by IFC convention even when linear dimensions are
+        in mm.  Blindly applying MM2_TO_M2 = 1e-6 to m²-scale values collapses
+        them to near zero.
+
+        When False (ft→m case), area conversion is always applied — Revit ft
+        exports encode area values in ft² and require the ft²→m² factor.
+    """
+    report.heuristic_applied           = True
+    report.heuristic_detail            = detail
+    report.length_conversion_applied   = True
+    report.length_conversion_factor    = length_factor
+    report.resolved_length_units       = resolved_length
+    report.height_before_conversion    = round(max_h, 4)
+
+    ifc_gen_area_candidates = [
+        c for c in candidates.area_candidates
+        if c.connector_style in ("ifc", "generic")
+    ]
+    ifc_gen_areas_before = [c.value_m2 for c in ifc_gen_area_candidates]
+    if ifc_gen_areas_before:
+        report.gfa_before_conversion = round(sum(ifc_gen_areas_before), 4)
+
+    # ── Determine whether area conversion should be applied ──────────────────
+    # IFC property-set areas (GrossArea, NetArea, etc.) are stored in m² by
+    # the IFC BaseQuantities convention, even when the exporter writes linear
+    # dimensions in mm.  Applying MM2_TO_M2 (1e-6) to a 401 m² value yields
+    # 0.0004 m² — wrong by 6 orders of magnitude.
+    #
+    # Guard: if guard_area_plausibility=True AND at least one area candidate
+    # already has a value ≥ 1.0 m² (i.e. is plausible as m² already), skip
+    # area conversion entirely and record the reason.
+    _AREA_ALREADY_M2_THRESHOLD: float = 1.0  # m² — anything above this is suspicious to convert with 1e-6
+
+    skip_area_conversion = False
+    skip_area_reason = ""
+    if guard_area_plausibility and ifc_gen_area_candidates:
+        plausible_count = sum(1 for v in ifc_gen_areas_before if v >= _AREA_ALREADY_M2_THRESHOLD)
+        if plausible_count > 0:
+            skip_area_conversion = True
+            skip_area_reason = (
+                f"area conversion skipped for mm→m heuristic: "
+                f"{plausible_count}/{len(ifc_gen_area_candidates)} IFC/generic area "
+                f"candidate(s) are already ≥ {_AREA_ALREADY_M2_THRESHOLD} m² "
+                f"(max={max(ifc_gen_areas_before):.4f} m²) — IFC quantity-set areas "
+                f"are stored in m² by convention even when linear units are mm"
+            )
+            log.info("unit_normalizer: %s", skip_area_reason)
+
+    if skip_area_conversion:
+        report.area_conversion_applied = False
+        report.area_conversion_factor  = 1.0
+        report.resolved_area_units     = "m2"
+    else:
+        report.area_conversion_applied = True
+        report.area_conversion_factor  = area_factor
+        report.resolved_area_units     = resolved_area
+
+    # ── Convert height candidates ─────────────────────────────────────────────
+    for c in ifc_gen_heights:
+        c.value_m = round(c.value_m * length_factor, 4)
+        c.units   = unit_label_h
+
+    # ── Convert area candidates (guarded) ────────────────────────────────────
+    if not skip_area_conversion:
+        for c in ifc_gen_area_candidates:
+            c.value_m2 = round(c.value_m2 * area_factor, 4)
+            c.units    = unit_label_a
+
+    post_heights = [
+        c.value_m for c in candidates.height_candidates
+        if c.connector_style in ("ifc", "generic")
+    ]
+    post_areas = [
+        c.value_m2 for c in candidates.area_candidates
+        if c.connector_style in ("ifc", "generic")
+    ]
+    if post_heights:
+        report.height_after_conversion = round(max(post_heights), 4)
+    if post_areas:
+        report.gfa_after_conversion = round(sum(post_areas), 4)
+
+    area_note = (
+        "area conversion skipped (IFC quantities already in m²)"
+        if skip_area_conversion
+        else f"GFA: {report.gfa_before_conversion} → {report.gfa_after_conversion} m², factor={area_factor}"
+    )
+    report.plausibility_warnings.append(
+        f"HEURISTIC CONVERSION APPLIED ({resolved_length}): {detail}. "
+        f"Implied storey height of {implied_storey_h_m:.2f} m is implausible for metric. "
+        f"Height converted to m "
+        f"(height: {report.height_before_conversion} → {report.height_after_conversion} m, "
+        f"factor={length_factor}); {area_note}. "
+        f"Verify unit system in source IFC export."
+    )
+    if skip_area_reason:
+        report.plausibility_warnings.append(f"AREA GUARD: {skip_area_reason}")
+    log.warning(
+        "unit_normalizer: storey-height heuristic fired (%s) — %s",
+        resolved_length,
+        detail,
+    )
+
+
 def _apply_storey_height_heuristic(
     candidates: "NormalizedCandidates",
     elements: list[dict[str, Any]],
     report: UnitNormalizationReport,
 ) -> None:
     """
-    Fallback heuristic: detects likely ft→m mismatch when no units are declared.
+    Fallback heuristic: detects likely ft→m or mm→m mismatch when no units are declared.
 
     Trigger condition (all must be true):
       1. No length conversion was applied (declared units == "m" or absent).
       2. At least one IfcBuildingStorey element is present in the element pool.
       3. The maximum IFC/generic height candidate divided by storey count
          exceeds _STOREY_H_SUSPICIOUS_M (default 6.0 m per storey).
-      4. The same value × FT_TO_M / storey_count falls within the plausible
-         storey-height range [_STOREY_H_PLAUSIBLE_MIN_M, _STOREY_H_PLAUSIBLE_MAX_M].
+      4a. (ft→m) The same value × FT_TO_M / storey_count falls within the plausible
+          storey-height range [_STOREY_H_PLAUSIBLE_MIN_M, _STOREY_H_PLAUSIBLE_MAX_M].
+      4b. (mm→m) The same value × MM_TO_M / storey_count falls within the plausible
+          storey-height range. Checked only when the ft→m branch does not fire.
 
-    When the heuristic fires, it converts IFC/generic height candidates from ft→m
-    AND converts area candidates from ft²→m² (both share the same source unit).
-
-    Why storey count?
-      A 3-storey building with a top elevation of ~41 ft (12.6 m) is perfectly
-      normal. Interpreted as metres, 41 m for 3 storeys → 13.7 m/storey is
-      immediately implausible. The storey count disambiguates the scale.
+    Metric-scale mismatch (mm→m):
+      Some IFC exporters (e.g. Autodesk Revit with default IFC export settings)
+      write length values in millimetres with no explicit `units` field. The
+      values are accepted by the pipeline as metres, yielding absurd results
+      (e.g. building_height_m = 9886.95 for a 3-storey building of ~10 m).
+      The mm→m branch catches this by checking whether ×0.001 produces a
+      plausible per-storey height.
 
     Conservative behaviour:
-      - If the heuristic trigger is ambiguous (storey count == 0 or implied
-        storey height in a plausible metric range), no conversion is applied.
+      - ft→m is checked first. Only if it does not fire is mm→m attempted.
+        This prevents mis-identifying genuinely imperial models as mm-scale.
+      - If neither branch fires, no conversion is applied.
       - The decision and evidence are always recorded in the report.
     """
     # ── Step 1: Count distinct IfcBuildingStorey elements (deduplicated) ──────
-    # The element pool produced by _collect_elements_from_base may contain the
-    # same IfcBuildingStorey node more than once because the Speckle object graph
-    # includes it as both a typed entity and as a parent reference on every
-    # element that belongs to that storey. Counting raw occurrences inflates the
-    # storey count (80 observed for a 4-storey building in testing), which makes
-    # the implied-storey-height heuristic trigger threshold unreachable.
-    #
-    # Deduplication priority:
-    #   1. element `id`               — most reliable (Speckle object ID)
-    #   2. element `globalId`         — IFC GlobalId, stable across exports
-    #   3. element `applicationId`    — connector-assigned application ID
-    #   4. name + elevation tuple     — if all IDs absent
-    #   5. Python object identity     — last resort (same object reference)
-    storey_ifc_classes = frozenset({
-        "ifcbuildingstorey", "ifcstorey", "ifcbuildingstory",
-    })
-    storey_ids: set[str] = set()
-    storey_raw_count = 0
-    malformed_skipped = 0
-    dedup_methods_used: list[str] = []
+    # Delegated to collect_deduped_storeys() — the same helper used by
+    # _normalize_elements to create storey_elevation height candidates.
+    # Using one shared source of truth avoids drift between the two paths.
+    _deduped, storey_raw_count, dedup_method_str, malformed_skipped = (
+        collect_deduped_storeys(elements)
+    )
+    storey_count = len(_deduped)
 
-    for e in elements:
-        raw_type = e.get("ifcType") or e.get("type")
-        normalised = _normalize_ifc_type(raw_type)
-        if normalised is None:
-            malformed_skipped += 1
-            continue
-        if normalised not in storey_ifc_classes:
-            continue
-
-        storey_raw_count += 1
-
-        # Build a stable dedup key using the best available identifier
-        obj_id    = str(e.get("id")            or "").strip()
-        global_id = str(e.get("globalId")      or e.get("applicationId") or "").strip()
-        name      = str(e.get("name")          or "").strip()
-        elevation = e.get("elevation")
-
-        if obj_id:
-            dedup_key = f"id:{obj_id}"
-            method = "object_id"
-        elif global_id:
-            dedup_key = f"gid:{global_id}"
-            method = "global_id"
-        elif name:
-            dedup_key = f"name:{name}:elev:{elevation}"
-            method = "name+elevation"
-        else:
-            dedup_key = f"pyid:{id(e)}"
-            method = "python_id_fallback"
-
-        storey_ids.add(dedup_key)
-        if method not in dedup_methods_used:
-            dedup_methods_used.append(method)
-
-    storey_count = len(storey_ids)
-    dedup_method_str = ", ".join(dedup_methods_used) if dedup_methods_used else "none"
-
-    report.storey_heuristic_ran             = True
-    report.storey_heuristic_raw_count       = storey_raw_count
-    report.storey_heuristic_valid_count     = storey_count
+    report.storey_heuristic_ran               = True
+    report.storey_heuristic_raw_count         = storey_raw_count
+    report.storey_heuristic_valid_count       = storey_count
     report.storey_heuristic_malformed_skipped = malformed_skipped
-    report.storey_heuristic_dedup_method    = dedup_method_str
+    report.storey_heuristic_dedup_method      = dedup_method_str
 
     if malformed_skipped:
         log.debug(
@@ -581,12 +733,14 @@ def _apply_storey_height_heuristic(
     max_h = max(c.value_m for c in ifc_gen_heights)
     implied_storey_h_m = max_h / storey_count
     implied_storey_h_if_ft = implied_storey_h_m * FT_TO_M  # what it would be if input was ft
+    implied_storey_h_if_mm = implied_storey_h_m * MM_TO_M  # what it would be if input was mm
 
     detail = (
         f"{storey_count} distinct IfcBuildingStorey (raw={storey_raw_count}, dedup_method={dedup_method_str!r}); "
         f"max height candidate = {max_h:.2f}; "
         f"implied storey height = {implied_storey_h_m:.2f} m; "
-        f"if interpreted as ft: {implied_storey_h_if_ft:.2f} m/storey"
+        f"if interpreted as ft: {implied_storey_h_if_ft:.2f} m/storey; "
+        f"if interpreted as mm: {implied_storey_h_if_mm:.4f} m/storey"
     )
 
     if (
@@ -594,62 +748,50 @@ def _apply_storey_height_heuristic(
         and _STOREY_H_PLAUSIBLE_MIN_M <= implied_storey_h_if_ft <= _STOREY_H_PLAUSIBLE_MAX_M
     ):
         # Heuristic fires — convert both height and area from ft → metric
-        report.heuristic_applied           = True
-        report.heuristic_detail            = detail
-        report.length_conversion_applied   = True
-        report.length_conversion_factor    = FT_TO_M
-        report.area_conversion_applied     = True
-        report.area_conversion_factor      = FT2_TO_M2
-        report.resolved_length_units       = "ft (heuristic)"
-        report.resolved_area_units         = "ft2 (heuristic)"
-        report.height_before_conversion    = round(max_h, 4)
-
-        ifc_gen_areas = [
-            c.value_m2 for c in candidates.area_candidates
-            if c.connector_style in ("ifc", "generic")
-        ]
-        if ifc_gen_areas:
-            report.gfa_before_conversion = round(sum(ifc_gen_areas), 4)
-
-        # Apply ft → m to height candidates
-        for c in ifc_gen_heights:
-            c.value_m = round(c.value_m * FT_TO_M, 4)
-            c.units   = "m (ft→m heuristic)"
-
-        # Apply ft² → m² to area candidates
-        for c in candidates.area_candidates:
-            if c.connector_style in ("ifc", "generic"):
-                c.value_m2 = round(c.value_m2 * FT2_TO_M2, 4)
-                c.units    = "m² (ft²→m² heuristic)"
-
-        post_heights = [
-            c.value_m for c in candidates.height_candidates
-            if c.connector_style in ("ifc", "generic")
-        ]
-        post_areas = [
-            c.value_m2 for c in candidates.area_candidates
-            if c.connector_style in ("ifc", "generic")
-        ]
-        if post_heights:
-            report.height_after_conversion = round(max(post_heights), 4)
-        if post_areas:
-            report.gfa_after_conversion = round(sum(post_areas), 4)
-
-        report.plausibility_warnings.append(
-            f"HEURISTIC CONVERSION APPLIED: {detail}. "
-            f"Implied storey height of {implied_storey_h_m:.2f} m is implausible for metric. "
-            f"Height and area candidates converted ft → m (height: "
-            f"{report.height_before_conversion} → {report.height_after_conversion} m). "
-            f"Verify unit system in source IFC export."
+        _apply_heuristic_conversion(
+            candidates, ifc_gen_heights, report,
+            length_factor=FT_TO_M,
+            area_factor=FT2_TO_M2,
+            resolved_length="ft (heuristic)",
+            resolved_area="ft2 (heuristic)",
+            unit_label_h="m (ft→m heuristic)",
+            unit_label_a="m² (ft²→m² heuristic)",
+            detail=detail,
+            implied_storey_h_m=implied_storey_h_m,
+            max_h=max_h,
         )
-        log.warning(
-            "unit_normalizer: storey-height heuristic fired — %s",
-            detail,
+
+    elif (
+        implied_storey_h_m > _STOREY_H_SUSPICIOUS_M
+        and _STOREY_H_PLAUSIBLE_MIN_M <= implied_storey_h_if_mm <= _STOREY_H_PLAUSIBLE_MAX_M
+    ):
+        # Metric-scale mismatch detected: values appear to be in millimetres,
+        # not metres.  Convert mm → m for height candidates only.
+        # Area is NOT blindly converted: IFC quantity-set areas
+        # (BaseQuantities.GrossArea etc.) are stored in m² by IFC convention
+        # even when the exporter writes linear dimensions in mm.  Applying
+        # MM2_TO_M2 (1e-6) to a 400 m² value would yield 0.0004 m².
+        # guard_area_plausibility=True causes _apply_heuristic_conversion to
+        # skip area conversion when candidates are already plausible in m².
+        _apply_heuristic_conversion(
+            candidates, ifc_gen_heights, report,
+            length_factor=MM_TO_M,
+            area_factor=MM2_TO_M2,
+            resolved_length="mm (heuristic)",
+            resolved_area="mm2 (heuristic)",
+            unit_label_h="m (mm→m heuristic)",
+            unit_label_a="m² (mm²→m² heuristic)",
+            detail=detail,
+            implied_storey_h_m=implied_storey_h_m,
+            max_h=max_h,
+            guard_area_plausibility=True,
         )
+
     else:
         log.debug(
             "unit_normalizer: heuristic did not fire — %s "
-            "(trigger requires implied_storey_h > %.1f m AND converted in [%.1f, %.1f] m)",
+            "(trigger requires implied_storey_h > %.1f m AND converted in [%.1f, %.1f] m "
+            "for either ft or mm interpretation)",
             detail,
             _STOREY_H_SUSPICIOUS_M,
             _STOREY_H_PLAUSIBLE_MIN_M,

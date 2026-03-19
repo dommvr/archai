@@ -5,6 +5,7 @@ export const PRECHECK_RUN_STATUSES = [
   "extracting_rules",
   "syncing_model",
   "computing_metrics",
+  "synced",
   "evaluating",
   "generating_report",
   "completed",

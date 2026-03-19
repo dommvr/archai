@@ -63,7 +63,7 @@ export function Navbar({ onLoginClick, onSignupClick }: NavbarProps) {
         {/* Desktop Auth Buttons */}
         <div className="hidden md:flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={onLoginClick} className="text-muted-foreground hover:text-white">
-            Log in
+            Sign in
           </Button>
           <Button variant="archai" size="sm" onClick={onSignupClick}>
             Get Started
@@ -100,7 +100,7 @@ export function Navbar({ onLoginClick, onSignupClick }: NavbarProps) {
           ))}
           <div className="flex gap-3 pt-2 border-t border-archai-graphite">
             <Button variant="ghost" size="sm" onClick={() => { onLoginClick(); setMenuOpen(false) }}>
-              Log in
+              Sign in
             </Button>
             <Button variant="archai" size="sm" onClick={() => { onSignupClick(); setMenuOpen(false) }}>
               Get Started

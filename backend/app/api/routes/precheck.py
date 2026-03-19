@@ -86,6 +86,7 @@ async def create_run(
     run = await repo.create_run(
         project_id=body.project_id,
         created_by=UUID(user.user_id),
+        name=body.name,
     )
     log.info("Created run %s for project=%s by user=%s", run.id, run.project_id, user.user_id)
     return run
@@ -162,7 +163,17 @@ async def ingest_site(
             request=body,
         )
         updated = await repo.update_run_site_context(run_id, site_context.id)
-        await pub.publish_run_status(run_id, PrecheckRunStatus.CREATED, "Site context saved")
+        # Preserve the run's current status if it has advanced past the setup phase
+        # (e.g. 'synced', 'completed'). Updating site context is a non-destructive
+        # metadata operation and must not regress a successfully synced run back to 'created'.
+        _ADVANCED_STATUSES = {
+            PrecheckRunStatus.SYNCED,
+            PrecheckRunStatus.EVALUATING,
+            PrecheckRunStatus.GENERATING_REPORT,
+            PrecheckRunStatus.COMPLETED,
+        }
+        next_status = run.status if run.status in _ADVANCED_STATUSES else PrecheckRunStatus.CREATED
+        await pub.publish_run_status(run_id, next_status, "Site context saved")
         return updated
 
     except Exception as exc:
@@ -336,7 +347,7 @@ async def sync_speckle_model(
             if updated_run:
                 await svc.derive_geometry_snapshot(updated_run, model_ref, site_context)
 
-            await pub.publish_run_status(run_id, PrecheckRunStatus.CREATED, "Model synced")
+            await pub.publish_run_status(run_id, PrecheckRunStatus.SYNCED, "Model synced")
         except Exception as exc:
             log.exception("Speckle sync failed for run=%s", run_id)
             await pub.publish_run_status(run_id, PrecheckRunStatus.FAILED, error_message=str(exc))

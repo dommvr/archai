@@ -13,35 +13,31 @@ interface ViewerAnnotationControllerProps {
  * Watches the active compliance issue and signals the Speckle viewer
  * to highlight affected geometry objects.
  *
- * READY FOR TOOL 1 INTEGRATION HERE
- * SPECKLE VIEWER WILL BE MOUNTED HERE — replace console.log stubs with:
- *   viewer.highlightObjects(issue.affectedObjectIds)
- *   viewer.resetHighlights()
- *
- * The viewer instance should be held in a module-level singleton or
- * React ref created inside ViewerPanel's useEffect, then exposed via
- * a module export or window.__speckleViewer for cross-component access.
+ * The viewer instance (LegacyViewer) is exposed by PrecheckViewerPanel
+ * via window.__speckleViewer after initialisation and cleared on dispose.
  */
 export function ViewerAnnotationController({ selectedIssue }: ViewerAnnotationControllerProps) {
   useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const viewer = (window as any).__speckleViewer
+
     if (!selectedIssue) {
-      // SPECKLE VIEWER WILL BE MOUNTED HERE — viewer.resetHighlights()
-      console.log('[ViewerAnnotationController] No issue selected — clearing highlights')
+      // resetHighlight() is the LegacyViewer API (singular — see LegacyViewer.d.ts:38)
+      void viewer?.resetHighlight?.()
       return
     }
 
     const objectIds = selectedIssue.affectedObjectIds ?? []
 
     if (objectIds.length === 0) {
-      console.log('[ViewerAnnotationController] Issue has no affected object IDs — skipping highlight')
+      void viewer?.resetHighlight?.()
       return
     }
 
-    // SPECKLE VIEWER WILL BE MOUNTED HERE
-    // if (window.__speckleViewer) {
-    //   window.__speckleViewer.highlightObjects(objectIds)
-    // }
-    console.log('[ViewerAnnotationController] Highlighting objects:', objectIds)
+    // highlightObjects() is defined on LegacyViewer (LegacyViewer.d.ts:37).
+    // Optional chaining guards the case where the viewer is not yet initialised,
+    // is loading a model, or has been disposed.
+    void viewer?.highlightObjects?.(objectIds)
   }, [selectedIssue])
 
   // Pure side-effect component — renders nothing

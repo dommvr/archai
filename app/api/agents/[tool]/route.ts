@@ -175,7 +175,7 @@ async function handlePrecheckPost(
         accessToken,
         path: '/precheck/runs',
         method: 'POST',
-        body: { projectId: parsed.projectId },
+        body: { projectId: parsed.projectId, name: parsed.name },
       })
     }
 

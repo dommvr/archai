@@ -76,3 +76,52 @@ export interface PricingTier {
   cta: string
   highlighted: boolean
 }
+
+// ── Signup & user profile types ─────────────────────────────
+
+export type DefaultUnits = 'metric' | 'imperial'
+export type UserRole =
+  | 'architect'
+  | 'interior_designer'
+  | 'structural_engineer'
+  | 'mep_engineer'
+  | 'project_manager'
+  | 'developer'
+  | 'student'
+  | 'other'
+
+export type PlanIntent = 'free' | 'premium'
+
+/**
+ * Fields collected during the multi-step signup wizard.
+ * Stored in public.user_profiles after account creation.
+ */
+export interface SignupFormData {
+  // Step 1 — Account
+  fullName: string
+  email: string
+  password: string
+  // Step 2 — Workspace defaults
+  companyOrStudio: string   // optional — empty string if skipped
+  role: UserRole | ''       // optional — empty string if skipped
+  timezone: string
+  defaultUnits: DefaultUnits
+  // Step 3 — Plan
+  planIntent: PlanIntent
+}
+
+/**
+ * Minimal user profile record stored in public.user_profiles.
+ * Mirrors the database schema — nullable optional fields match DB defaults.
+ */
+export interface UserProfile {
+  id: string               // = auth.users.id
+  fullName: string
+  companyOrStudio: string | null
+  role: UserRole | null
+  timezone: string
+  defaultUnits: DefaultUnits
+  planIntent: PlanIntent
+  createdAt: string
+  updatedAt: string
+}

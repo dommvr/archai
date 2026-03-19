@@ -10,13 +10,14 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 
 interface CreatePrecheckRunDialogProps {
   open:           boolean
   onOpenChange:   (open: boolean) => void
   projectId:      string
   userId:         string
-  onCreate:       (projectId: string, userId: string) => Promise<void>
+  onCreate:       (projectId: string, userId: string, name: string | undefined) => Promise<void>
 }
 
 export function CreatePrecheckRunDialog({
@@ -27,12 +28,14 @@ export function CreatePrecheckRunDialog({
   onCreate,
 }: CreatePrecheckRunDialogProps) {
   const [loading, setLoading] = useState(false)
+  const [name, setName] = useState('')
 
   async function handleCreate() {
     setLoading(true)
     try {
-      await onCreate(projectId, userId)
+      await onCreate(projectId, userId, name.trim() || undefined)
       onOpenChange(false)
+      setName('')
     } catch (err) {
       console.error('[CreatePrecheckRunDialog] Failed to create run:', err)
     } finally {
@@ -52,6 +55,23 @@ export function CreatePrecheckRunDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-2">
+          <div className="space-y-1.5">
+            <label
+              htmlFor="run-name"
+              className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider"
+            >
+              Run Name <span className="normal-case text-muted-foreground/50">(optional)</span>
+            </label>
+            <Input
+              id="run-name"
+              placeholder="e.g. Tower Option A — variance submission"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="bg-archai-black border-archai-graphite text-sm h-8"
+              disabled={loading}
+            />
+          </div>
+
           <div className="rounded-lg bg-archai-charcoal border border-archai-graphite p-3 space-y-1">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Project ID</p>
             <p className="text-xs font-mono text-white truncate">{projectId}</p>

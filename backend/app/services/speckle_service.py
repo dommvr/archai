@@ -77,7 +77,11 @@ from app.core.schemas import (
     SyncSpeckleModelRequest,
 )
 from app.repositories.precheck_repository import PrecheckRepository
-from app.services.unit_normalizer import UnitNormalizationReport, detect_and_normalize_units
+from app.services.unit_normalizer import (
+    UnitNormalizationReport,
+    collect_deduped_storeys,
+    detect_and_normalize_units,
+)
 
 log = logging.getLogger(__name__)
 
@@ -378,6 +382,7 @@ class SpeckleService:
                                 "computed_elevation",
                                 "bbox_extent",
                                 "storey_elevation",
+                                "storey_elevation_inferred",
                                 "element_dimension",
                             )
                         },
@@ -811,6 +816,24 @@ def _base_to_metric_dict(obj: Any) -> dict[str, Any]:
         "topElevation": getattr(obj, "topElevation", None),
         "height":       getattr(obj, "height",       None),
         "units":        getattr(obj, "units",        None),
+        # elevation — the floor-level elevation of an IfcBuildingStorey / Level.
+        # The Speckle IFC connector sets this as `elevation` (lowercase) on
+        # Objects.BuiltElements.Level objects.  IFC spec casing is "Elevation"
+        # (capital E) on raw DataObjects.  RefElevation / refElevation are
+        # alternate names used by some IFC connector versions for the same
+        # IfcBuildingStorey.Elevation schema attribute.
+        # All four casings captured here so _try_extract_storey_elevation can
+        # find the value regardless of which the connector chose.
+        "elevation":    getattr(obj, "elevation",    None),
+        "Elevation":    getattr(obj, "Elevation",    None),
+        "RefElevation": getattr(obj, "RefElevation", None),
+        "refElevation": getattr(obj, "refElevation", None),
+        # ownerId — on direct-upload IFC DataObjects, building elements (walls,
+        # slabs, columns, etc.) carry the speckle object-id of their containing
+        # IfcBuildingStorey under `ownerId`.  We use this to group elements by
+        # storey and infer storey base elevations from contained-element bbox
+        # min-Z when the storey objects themselves carry no elevation attribute.
+        "ownerId":      getattr(obj, "ownerId",      None),
     }
 
     # layer — Rhino connector stores semantic info in layer names
@@ -841,10 +864,18 @@ def _base_to_metric_dict(obj: Any) -> dict[str, Any]:
     if qtys is not None:
         d["quantities"] = _extract_nested_dict(qtys)
 
-    # bbox — bounding box for height proxy (Rhino, some IFC/Revit connectors)
+    # bbox — bounding box for height proxy (Rhino, some IFC/Revit connectors).
+    # For direct-upload IFC DataObjects the `bbox` attribute is absent — the
+    # Speckle IFC importer never populates it.  In that case we derive a
+    # synthetic bbox from the mesh vertices in `_displayValue`.  This is the
+    # only geometry available on these objects (runtime-confirmed 2026-03-19).
     bbox = getattr(obj, "bbox", None)
     if bbox is not None:
         d["bbox"] = _extract_bbox(bbox)
+    else:
+        synthetic = _extract_bbox_from_display_value(obj)
+        if synthetic is not None:
+            d["bbox"] = synthetic
 
     return d
 
@@ -924,6 +955,61 @@ def _extract_bbox(bbox: Any) -> dict[str, Any] | None:
     return result if result else None
 
 
+def _extract_bbox_from_display_value(obj: Any) -> dict[str, Any] | None:
+    """
+    Derives a synthetic bbox dict (keys: min_z, max_z) from the z-coordinates
+    of all mesh vertices in the element's displayValue geometry.
+
+    Used for direct-upload IFC DataObjects (speckle_type=Objects.Data.DataObject)
+    where the Speckle IFC importer does NOT populate a `bbox` attribute on the
+    element itself.  Geometry is stored exclusively in `_displayValue` — a list
+    of Objects.Geometry.Mesh objects, each carrying a flat `vertices` list in
+    the format [x0,y0,z0, x1,y1,z1, ...].
+
+    Runtime-confirmed facts that justify this approach (inspected 2026-03-19):
+      - `bbox` is absent from ALL DataObject elements in this stream.
+      - `_displayValue` meshes have NO `bbox` attribute either.
+      - Mesh `vertices` lists are PRESENT and already in metres (not mm).
+      - 5,952 of 6,755 total elements have usable vertex data.
+      - The global z extent from structural elements is -1.20 m to 8.44 m.
+
+    specklepy stores `_displayValue` in `__dict__` under the key `_displayValue`
+    (underscore prefix).  `getattr(obj, "displayValue")` resolves it correctly
+    via the Base class's `__getattr__` — both spellings work.
+
+    Returns None when displayValue is absent or contains no numeric vertices.
+    Returns {"min_z": float, "max_z": float} otherwise.
+    The returned dict is compatible with the existing `_collect_building_bbox`
+    and `_try_extract_height_ifc` readers which expect `bbox.get("min_z")` and
+    `bbox.get("max_z")`.
+    """
+    dv = getattr(obj, "displayValue", None)
+    if not dv or not isinstance(dv, list):
+        return None
+
+    z_min: float | None = None
+    z_max: float | None = None
+
+    for mesh in dv:
+        verts = getattr(mesh, "vertices", None)
+        if not verts or not isinstance(verts, list):
+            continue
+        # vertices = [x0,y0,z0, x1,y1,z1, ...]  — z is every 3rd value starting at index 2
+        n = len(verts)
+        for k in range(2, n, 3):
+            z = verts[k]
+            if not isinstance(z, (int, float)):
+                continue
+            if z_min is None or z < z_min:
+                z_min = float(z)
+            if z_max is None or z > z_max:
+                z_max = float(z)
+
+    if z_min is None or z_max is None:
+        return None
+    return {"min_z": z_min, "max_z": z_max}
+
+
 # ════════════════════════════════════════════════════════════
 # SEMANTIC CANDIDATES
 # Internal typed structures for the normalization contract between
@@ -974,8 +1060,14 @@ class HeightCandidate:
     #     with noise classes (furniture, MEP, annotations) excluded.
     #     A single synthetic candidate with source_obj_id="__global_bbox__".
     #
-    # "storey_elevation" — P3: IfcBuildingStorey floor-level elevation.
+    # "storey_elevation" — P3a: IfcBuildingStorey floor-level elevation (native).
     #     Building height estimated as storey span + avg floor-to-floor.
+    #
+    # "storey_elevation_inferred" — P3b: storey base elevation inferred from
+    #     contained element bbox.min_z grouped by ownerId.  Used when the IFC
+    #     connector did not serialise IfcBuildingStorey.Elevation.  Distinct
+    #     from "storey_elevation" so that the derive step can handle the full
+    #     elevation range including z=0 (ground) and sub-grade (negative) values.
     #
     # "element_dimension" — P4 (weak fallback): element's own dimension field.
     #     Sources: height/overallHeight fields, BaseQuantities.Height, bbox
@@ -1004,6 +1096,15 @@ class NormalizedCandidates:
     objects_by_broad_type: dict[str, int] = dc_field(default_factory=dict)
     connector_styles_matched: list[str] = dc_field(default_factory=list)
     extraction_notes: list[str] = dc_field(default_factory=list)
+    # Count of IfcSlab elements excluded from GFA because their predefined type
+    # or name indicates they are non-floor (roof, foundation, paving).
+    # Surfaced in gfa_diag for auditability.
+    slab_excluded_non_floor: int = 0
+    # Per-slab GFA inclusion/exclusion audit trail.
+    # Each entry: {obj_id, name, type_name, level, area_m2, included, reason}
+    # Populated by _extract_ifc_candidates and _extract_revit_candidates;
+    # surfaced verbatim in gfa_diag so every slab decision is inspectable.
+    slab_gfa_decisions: list[dict[str, Any]] = dc_field(default_factory=list)
 
 
 # ════════════════════════════════════════════════════════════
@@ -1026,6 +1127,155 @@ _IFC_VERTICAL_CLASSES = frozenset({
 _IFC_ROOF_CLASSES = frozenset({
     "ifcroof", "ifcroofing",
 })
+
+# IfcSlab PredefinedType values (IFC spec, uppercase) that are NOT usable floor
+# area.  Elements with these types are excluded from GFA slab candidates.
+# "FLOOR" and "LANDING" are the only types that represent occupied floor plates.
+# "NOTDEFINED" / "USERDEFINED" are kept in when no other evidence is available.
+_NON_FLOOR_SLAB_PREDEFINED_TYPES: frozenset[str] = frozenset({
+    "roof", "baseslab", "paving",
+})
+
+# Name fragments (lowercase) that reliably indicate a non-floor IfcSlab.
+# Used only when predefined type is absent or NOTDEFINED/USERDEFINED.
+_NON_FLOOR_SLAB_NAME_FRAGMENTS: frozenset[str] = frozenset({
+    "roof slab", "roof deck", "roof plate",
+    "foundation", "slab on grade", "ground slab",
+    "pad footing", "pile cap",
+})
+
+
+# Name/reference fragments that identify an element as a chimney, flue, or
+# similar roof appendage that must NOT determine building height.
+# These are deliberately narrow — only fragments that unambiguously indicate
+# a non-building-height element (confirmed present in this model family).
+_ROOF_APPENDAGE_NAME_FRAGMENTS: frozenset[str] = frozenset({
+    "fireplace", "chimney", "flue", "vent stack", "ventstack",
+})
+
+
+def _is_identifiable_roof_element(elem: dict[str, Any]) -> bool:
+    """
+    Returns True when the element is confidently a roof plane whose bbox.max_z
+    represents the top of the building roof — not a chimney, flue, or other
+    roof appendage.
+
+    Detection priority (based on runtime-confirmed metadata shapes, 2026-03-19):
+      1. ifcType == "IFCROOF"                    — explicit IFC roof class
+      2. ifcType == "IFCSLAB" AND (name or Pset_SlabCommon.Reference) starts
+         with "roof" or contains "basic roof"    — Revit roof slabs exported
+         via IFC connector carry "Basic Roof:…" names and references
+
+    Explicit rejection (must NOT win even if roof-like by class):
+      - name contains "fireplace", "chimney", "flue", "vent stack"
+
+    Returns False for everything else.  Does not guess.
+    """
+    ifc_type = str(elem.get("ifcType") or "").lower().strip()
+    name = str(elem.get("name") or "").lower()
+
+    # Reject chimney/flue/fireplace regardless of IFC class
+    for fragment in _ROOF_APPENDAGE_NAME_FRAGMENTS:
+        if fragment in name:
+            return False
+
+    # Explicit IFC roof class
+    if ifc_type == "ifcroof":
+        return True
+
+    # IFC slab whose name or Pset_SlabCommon.Reference identifies it as a roof.
+    # Revit roof slabs exported via the IFC connector arrive as IFCSLAB with
+    # names following "Basic Roof:<type>:<id>" and Reference = "Basic Roof:<type>".
+    # Both the name and reference are available in the flattened dict.
+    if ifc_type == "ifcslab":
+        props = elem.get("properties") or {}
+        slab_common = props.get("Pset_SlabCommon") or {}
+        ref = str(slab_common.get("Reference") or "").lower()
+        # name starts with "roof" or "basic roof" (handles "Basic Roof:…")
+        if name.startswith("roof") or "basic roof" in name:
+            return True
+        # Pset_SlabCommon.Reference starts with "roof" or "basic roof"
+        if ref.startswith("roof") or "basic roof" in ref:
+            return True
+
+    return False
+
+
+def _is_non_floor_slab(
+    ifc_type_field: str,
+    name: str,
+    elem: "dict[str, Any]",
+) -> tuple[bool, str]:
+    """
+    Returns (should_exclude, reason) for an IfcSlab-class element.
+
+    Checks in priority order:
+      1. predefinedType / PredefinedType field on the element
+         (IFC spec casing and Speckle-lowercased variant)
+      2. Predefined type embedded as a suffix in ifc_type_field
+         (e.g. "ifcslab.roof" from some connector versions)
+      3. Name heuristic — only when no predefined type is available
+
+    Returns (True, reason) when the slab should be excluded from GFA.
+    Returns (False, '') when the slab appears to be a floor plate.
+    """
+    # ── 1. Explicit predefined type field ─────────────────────
+    for key in ("predefinedType", "PredefinedType"):
+        raw = elem.get(key)
+        if raw is not None:
+            pt = str(raw).strip().lower()
+            if pt in _NON_FLOOR_SLAB_PREDEFINED_TYPES:
+                return True, f"predefined_type={pt}"
+            if pt in ("floor", "landing", "notdefined", "userdefined", ""):
+                # Explicitly floor/landing, or ambiguous — include it
+                return False, ""
+
+    # ── 2. Predefined type embedded in ifc_type_field suffix ──
+    # Handles "ifcslab.roof", "ifcslab.baseslab", etc.
+    if "." in ifc_type_field:
+        suffix = ifc_type_field.split(".")[-1].strip()
+        if suffix in _NON_FLOOR_SLAB_PREDEFINED_TYPES:
+            return True, f"ifc_type_suffix={suffix}"
+
+    # ── 3. Name heuristic (last resort) ───────────────────────
+    # Only applied when no predefined type was found at all.
+    for fragment in _NON_FLOOR_SLAB_NAME_FRAGMENTS:
+        if fragment in name:
+            return True, f"name_heuristic={fragment!r}"
+    # Single-word "roof" in name is a strong signal even if not in multi-word
+    # fragments above (e.g. element named "Roof" or "Roof:…").
+    if name.startswith("roof") or " roof" in name:
+        return True, "name_heuristic=roof"
+
+    # Revit "Pad" family: Revit names follow "Family:TypeName:ID" convention.
+    # If the first colon-segment is "pad", the element is a structural foundation
+    # pad (e.g. "Pad:Pad 1:126476") and should never count toward GFA.
+    # This handles Revit Pad families regardless of whether they arrive through
+    # the IFC or Revit extractor path.
+    segments = name.split(":")
+    first_segment = segments[0].strip()
+    if first_segment == "pad":
+        return True, "name_heuristic=revit_pad_family"
+
+    # Dimension-named TypeName: Revit "Family:TypeName:ID" convention carries
+    # the TypeName as the second colon-segment.  When TypeName starts with a
+    # pure numeric string (like "915" in "Floor:915 slab:137832"), the element
+    # is named after its physical dimension (e.g. 915 mm slab thickness) rather
+    # than its function.  These are structural/engineering slabs — exterior
+    # platforms, structural decks, etc. — not occupied floor plates.
+    #
+    # Verified on this model: "Floor:915 slab:137832" (exterior entry platform)
+    # should NOT count toward GFA; "Floor:Finish Floor:126151" (interior floor)
+    # SHOULD count.  "Finish Floor" starts with a letter, so is never excluded.
+    if len(segments) >= 2:
+        type_name = segments[1].strip()
+        type_words = type_name.split()
+        if type_words and type_words[0].isdigit():
+            return True, f"name_heuristic=dimension_named_type({type_name!r})"
+
+    return False, ""
+
+
 # Building-structural elements suitable for global-bbox height estimation.
 # These are all classes whose bbox.max_z meaningfully contributes to building height.
 _IFC_STRUCTURAL_FOR_BBOX = frozenset({
@@ -1051,6 +1301,18 @@ _IFC_NOISE_CLASSES = frozenset({
     "ifccablesegment", "ifccablefitting",
     "ifcelectricdistributionboard", "ifcswitchingdevice", "ifclightfixture",
     "ifcproxy",
+})
+
+# IFC classes whose bbox.min_z is a meaningful architectural/structural datum
+# suitable for inferring a storey base elevation.  Excludes noise (MEP, furniture)
+# and also excludes IfcBuildingStorey itself (the inference target, not input).
+_IFC_CLASSES_FOR_STOREY_BASE_INFERENCE = frozenset({
+    "ifcwall", "ifcwallstandardcase", "ifccurtainwall",
+    "ifccolumn", "ifcbeam", "ifcmember",
+    "ifcslab", "ifcfloor", "ifcplate",
+    "ifcstair", "ifcstairflight",
+    "ifcramp", "ifcrampflight",
+    "ifcdoor", "ifcwindow",
 })
 
 
@@ -1087,9 +1349,30 @@ def _normalize_elements(elements: list[dict[str, Any]]) -> NormalizedCandidates:
         result.objects_by_broad_type[t] = result.objects_by_broad_type.get(t, 0) + 1
 
     # Run extractors (highest confidence first)
-    rev_area, rev_height, rev_parking = _extract_revit_candidates(elements)
-    ifc_area, ifc_height, ifc_parking = _extract_ifc_candidates(elements)
+    rev_area, rev_height, rev_parking, rev_slab_decisions = (
+        _extract_revit_candidates(elements)
+    )
+    (
+        ifc_area, ifc_height, ifc_parking, ifc_non_floor_excl,
+        ifc_slab_decisions,
+    ) = _extract_ifc_candidates(elements)
     gen_area, gen_height, gen_parking = _extract_generic_candidates(elements)
+    result.slab_excluded_non_floor = ifc_non_floor_excl
+
+    # Merge slab audit decisions: rev first (higher confidence), then ifc.
+    # Deduplicate by obj_id so the audit contains exactly one final decision per
+    # slab object — matching the area_candidates dedup below (first match wins,
+    # Revit > IFC priority).  Without this, any element that passes both the
+    # is_revit and has_ifc_hint checks produces two entries for the same obj_id.
+    _raw_decisions = rev_slab_decisions + ifc_slab_decisions
+    _seen_slab_ids: set[str] = set()
+    _deduped_decisions: list[dict[str, Any]] = []
+    for _d in _raw_decisions:
+        _oid = _d.get("obj_id", "")
+        if _oid not in _seen_slab_ids:
+            _seen_slab_ids.add(_oid)
+            _deduped_decisions.append(_d)
+    result.slab_gfa_decisions = _deduped_decisions
 
     # Merge with dedup by source_obj_id
     area_seen: set[str] = set()
@@ -1112,6 +1395,128 @@ def _normalize_elements(elements: list[dict[str, Any]]) -> NormalizedCandidates:
     global_bbox_candidate = _extract_global_bbox_height_candidate(elements)
     if global_bbox_candidate is not None:
         result.height_candidates.append(global_bbox_candidate)
+
+    # Stage 4 (P3): storey elevation candidates from deduplicated storeys.
+    # The flat element pool contains 96 storey-type objects for a 6-storey
+    # building: 6 canonical entities + 90 back-reference stubs emitted when
+    # each building element's `level` attribute is traversed.  The stubs carry
+    # no elevation data, so calling _try_extract_storey_elevation on all 96
+    # produces 90 guaranteed failures that mask whether the 6 real entities
+    # have elevation.  collect_deduped_storeys() returns only the 6 canonical
+    # dicts (deduplicated by object id), which are then the sole source for
+    # storey_elevation height candidates.
+    _deduped_storeys, _storey_raw, _storey_dedup_method, _ = (
+        collect_deduped_storeys(elements)
+    )
+    _storey_elev_created = 0
+    _storey_elev_missing = 0
+    for _st in _deduped_storeys:
+        _st_id = str(_st.get("id") or "")
+        _elev = _try_extract_storey_elevation(_st)
+        if _elev is not None:
+            result.height_candidates.append(HeightCandidate(
+                source_obj_id=_st_id or f"__storey_{_storey_elev_created}__",
+                value_m=_elev,
+                units=None,
+                confidence=0.6,
+                source_field="storey.elevation",
+                connector_style="ifc",
+                height_kind="storey_elevation",
+            ))
+            _storey_elev_created += 1
+            log.debug(
+                "_normalize_elements: storey_elevation id=%s name=%r elev=%s",
+                _st_id, _st.get("name"), _elev,
+            )
+        else:
+            _storey_elev_missing += 1
+            log.warning(
+                "_normalize_elements: deduped storey id=%s name=%r "
+                "ifcType=%r — no elevation found "
+                "(top_keys=%s props_keys=%s)",
+                _st_id, _st.get("name"), _st.get("ifcType"),
+                list(_st.keys())[:20],
+                list((_st.get("properties") or {}).keys())[:10],
+            )
+    if _deduped_storeys:
+        log.info(
+            "_normalize_elements: storey dedup — raw=%d deduped=%d "
+            "elev_candidates=%d elev_missing=%d",
+            _storey_raw, len(_deduped_storeys),
+            _storey_elev_created, _storey_elev_missing,
+        )
+
+    # Stage 4 (P3-inferred): when native storey elevation is absent, infer
+    # storey base elevations from the min bbox.min_z of structural/architectural
+    # elements grouped by their ownerId (which references the containing storey).
+    # Only runs when the native path produced zero storey_elevation candidates,
+    # to avoid double-counting if both paths somehow yield results.
+    _inferred_storey_groups: dict[str, float] = {}
+    _inferred_storey_counts: dict[str, int] = {}
+    _inferred_storey_types: dict[str, list[str]] = {}
+    _inferred_storey_names: dict[str, str] = {}
+    _inferred_candidates_created = 0
+
+    if _storey_elev_created == 0:
+        (
+            _inferred_storey_groups,
+            _inferred_storey_counts,
+            _inferred_storey_types,
+            _inferred_storey_names,
+        ) = _infer_storey_elevations_from_owner_bbox(elements)
+
+        for _sid, _raw_z in _inferred_storey_groups.items():
+            # Normalise mm → m using the same unit heuristic used elsewhere.
+            # Raw IFC values from Revit-origin files are in mm; a legitimate
+            # storey base in metres is virtually always < 1000 m.
+            # We apply the same threshold used by detect_and_normalize_units:
+            # if |raw_z| >= 1000, divide by 1000.
+            if abs(_raw_z) >= 1000.0:
+                _z_m = _raw_z / 1000.0
+                _units_note = "mm→m"
+            else:
+                _z_m = _raw_z
+                _units_note = "m"
+
+            _sname = _inferred_storey_names.get(_sid, "")
+            _nelem = _inferred_storey_counts.get(_sid, 0)
+            _types = _inferred_storey_types.get(_sid, [])
+            result.height_candidates.append(HeightCandidate(
+                source_obj_id=_sid,
+                value_m=_z_m,
+                units=None,
+                confidence=0.55,
+                source_field="storey_base.inferred_from_owner_bbox",
+                connector_style="ifc",
+                # P3b tier — inferred storey base from element geometry.
+                # Distinct from "storey_elevation" (native IFC attribute path)
+                # so _derive_metrics can handle the full elevation range
+                # including z=0 and sub-grade values correctly.
+                height_kind="storey_elevation_inferred",
+            ))
+            _inferred_candidates_created += 1
+            log.debug(
+                "_normalize_elements: inferred storey base — "
+                "id=%s name=%r raw_z=%s units=%s z_m=%.4f "
+                "n_elements=%d types=%s",
+                _sid, _sname, _raw_z, _units_note, _z_m, _nelem, _types,
+            )
+
+        if _inferred_storey_groups:
+            log.info(
+                "_normalize_elements: storey base inferred from ownerId/bbox — "
+                "storey_groups=%d inferred_candidates=%d",
+                len(_inferred_storey_groups),
+                _inferred_candidates_created,
+            )
+        elif _deduped_storeys:
+            # Storeys were found but no elements carried ownerId + bbox.
+            log.warning(
+                "_normalize_elements: storey base inference failed — "
+                "%d deduped storeys found but no qualifying elements "
+                "had ownerId + bbox.min_z",
+                len(_deduped_storeys),
+            )
 
     for c in rev_parking + ifc_parking + gen_parking:
         if c.source_obj_id not in parking_seen:
@@ -1142,12 +1547,40 @@ def _normalize_elements(elements: list[dict[str, Any]]) -> NormalizedCandidates:
     if result.height_candidates:
         notes.append(
             f"Height candidates: {len(result.height_candidates)} total "
-            f"(revit={len(rev_height)}, ifc={len(ifc_height)}, generic={len(gen_height)})"
+            f"(revit={len(rev_height)}, ifc={len(ifc_height)}, "
+            f"generic={len(gen_height)})"
         )
     else:
         notes.append(
             "No height candidates found — no elements with topElevation, "
             "level.elevation+height, bbox.max_z, or IFC quantity Height"
+        )
+    # Storey elevation diagnostic — always emitted when storeys were found.
+    if _deduped_storeys:
+        notes.append(
+            f"Storey elevation: raw={_storey_raw} "
+            f"deduped={len(_deduped_storeys)} "
+            f"native_candidates={_storey_elev_created} "
+            f"native_missing={_storey_elev_missing}"
+        )
+    # Inferred storey base elevation diagnostic.
+    if _inferred_storey_groups:
+        _inferred_detail = "; ".join(
+            f"{_inferred_storey_names.get(sid, sid[:8])}:"
+            f"{_inferred_storey_groups[sid]:.1f}raw"
+            f"({_inferred_storey_counts.get(sid, 0)}elem)"
+            for sid in sorted(_inferred_storey_groups)
+        )
+        notes.append(
+            f"Storey base inferred from ownerId/bbox: "
+            f"storey_groups={len(_inferred_storey_groups)} "
+            f"candidates={_inferred_candidates_created} — "
+            f"{_inferred_detail}"
+        )
+    elif _storey_elev_created == 0 and _deduped_storeys:
+        notes.append(
+            "Storey base inference: no qualifying elements had "
+            "ownerId + bbox.min_z — inferred storey elevation unavailable"
         )
     if result.parking_candidates:
         notes.append(
@@ -1231,7 +1664,7 @@ def _normalize_elements(elements: list[dict[str, Any]]) -> NormalizedCandidates:
 
 def _extract_revit_candidates(
     elements: list[dict[str, Any]],
-) -> tuple[list[AreaCandidate], list[HeightCandidate], list[ParkingCandidate]]:
+) -> tuple[list[AreaCandidate], list[HeightCandidate], list[ParkingCandidate], list[dict[str, Any]]]:
     """
     Extracts candidates using Revit-connector conventions.
 
@@ -1248,17 +1681,30 @@ def _extract_revit_candidates(
       - topElevation field → direct elevation metric (confidence 0.9)
       - level.elevation + height → computed proxy (confidence 0.7)
 
+    Storey elevation extraction (Objects.BuiltElements.Level):
+      - Objects.BuiltElements.Level is the Speckle connector mapping for
+        IfcBuildingStorey when uploading IFC files via the Speckle IFC connector
+        or syncing via the Revit connector.  These elements carry a floor-level
+        elevation in the `elevation` attribute.
+      - connector_style is set based on whether the element carries a Revit
+        `parameters` bag (true Revit native → "revit", metric already) or not
+        (IFC-connector path → "ifc", value may be in mm and needs conversion).
+
     Parking extraction:
       - speckle_type contains "Parking" OR category == "parking"
+
+    Returns (area_candidates, height_candidates, parking_candidates, slab_gfa_decisions)
     """
     area_candidates: list[AreaCandidate] = []
     height_candidates: list[HeightCandidate] = []
     parking_candidates: list[ParkingCandidate] = []
+    slab_gfa_decisions: list[dict[str, Any]] = []
 
     for elem in elements:
         obj_id = str(elem.get("id") or "")
         speckle_type = str(elem.get("speckle_type") or "").lower()
         category = str(elem.get("category") or "").lower()
+        name = str(elem.get("name") or "").lower()
 
         # Revit-origin detection: speckle_type or parameters bag
         is_revit = (
@@ -1269,18 +1715,86 @@ def _extract_revit_candidates(
         if not is_revit:
             continue
 
+        # ── Storey elevation (Objects.BuiltElements.Level) ─────
+        # Objects.BuiltElements.Level is the connector mapping for
+        # IfcBuildingStorey elements.  These pass the `is_revit` check above
+        # (because "objects.builtelements" in speckle_type) but the IFC
+        # extractor skips them (no ifcType, no IFC hint).  Handle them here.
+        # connector_style determines whether the value goes through mm→m
+        # conversion: "ifc" = in mm (IFC-connector path, no Revit params);
+        # "revit" = already in meters (Revit-native connector path).
+        if "builtelements" in speckle_type and speckle_type.endswith(".level"):
+            elev = _try_extract_storey_elevation(elem)
+            if elev is not None:
+                style = "revit" if bool(elem.get("parameters")) else "ifc"
+                height_candidates.append(HeightCandidate(
+                    source_obj_id=obj_id,
+                    value_m=float(elev),
+                    units=None,
+                    confidence=0.6,
+                    source_field="elevation",
+                    connector_style=style,
+                    height_kind="storey_elevation",
+                ))
+                log.debug(
+                    "_extract_revit: storey_elevation obj_id=%s name=%r "
+                    "elev=%s connector_style=%s",
+                    obj_id, elem.get("name"), elev, style,
+                )
+            else:
+                log.debug(
+                    "_extract_revit: Level obj_id=%s name=%r — "
+                    "no elevation field found (keys=%s)",
+                    obj_id, elem.get("name"),
+                    [k for k in elem if "elev" in k.lower() or k in ("elevation", "Elevation")],
+                )
+
         # ── Area candidates (floor elements) ──────────────────
         if _speckle_type_contains(elem, "Floor"):
             area, field = _try_extract_area_revit(elem)
             if area is not None and area > 0:
-                area_candidates.append(AreaCandidate(
-                    source_obj_id=obj_id,
-                    value_m2=area,
-                    units="m²",     # Revit connector outputs metric by default
-                    confidence=0.9 if field == "area" else 0.85,
-                    source_field=field,
-                    connector_style="revit",
-                ))
+                # Apply the same non-floor exclusion filter used by the IFC
+                # extractor.  Revit "Pad" family elements (foundation pads) and
+                # dimension-named slab types (e.g. "915 slab") arrive here with
+                # speckle_type containing "Floor" but must not count toward GFA.
+                # Pass empty ifc_type_field — only the name heuristic is
+                # relevant for Revit-origin elements.
+                rev_exclude, rev_excl_reason = _is_non_floor_slab("", name, elem)
+                type_name = name.split(":")[1].strip() if ":" in name else ""
+                if rev_exclude:
+                    slab_gfa_decisions.append({
+                        "obj_id": obj_id,
+                        "name": name,
+                        "type_name": type_name,
+                        "level": str((elem.get("level") or {}).get("name", "") or ""),
+                        "area_m2": round(area, 4),
+                        "included": False,
+                        "reason": rev_excl_reason,
+                        "extractor": "revit",
+                    })
+                    log.debug(
+                        "_extract_revit: excluded floor obj_id=%s from GFA (%s)",
+                        obj_id, rev_excl_reason,
+                    )
+                else:
+                    slab_gfa_decisions.append({
+                        "obj_id": obj_id,
+                        "name": name,
+                        "type_name": type_name,
+                        "level": str((elem.get("level") or {}).get("name", "") or ""),
+                        "area_m2": round(area, 4),
+                        "included": True,
+                        "reason": "passed non-floor check",
+                        "extractor": "revit",
+                    })
+                    area_candidates.append(AreaCandidate(
+                        source_obj_id=obj_id,
+                        value_m2=area,
+                        units="m²",     # Revit connector outputs metric by default
+                        confidence=0.9 if field == "area" else 0.85,
+                        source_field=field,
+                        connector_style="revit",
+                    ))
 
         # ── Height candidates ──────────────────────────────────
         top = elem.get("topElevation")
@@ -1318,7 +1832,7 @@ def _extract_revit_candidates(
                 connector_style="revit",
             ))
 
-    return area_candidates, height_candidates, parking_candidates
+    return area_candidates, height_candidates, parking_candidates, slab_gfa_decisions
 
 
 def _try_extract_area_revit(elem: dict[str, Any]) -> tuple[float | None, str]:
@@ -1343,7 +1857,13 @@ def _try_extract_area_revit(elem: dict[str, Any]) -> tuple[float | None, str]:
 
 def _extract_ifc_candidates(
     elements: list[dict[str, Any]],
-) -> tuple[list[AreaCandidate], list[HeightCandidate], list[ParkingCandidate]]:
+) -> tuple[
+    list[AreaCandidate],
+    list[HeightCandidate],
+    list[ParkingCandidate],
+    int,
+    list[dict[str, Any]],
+]:
     """
     Extracts candidates using IFC/direct-upload conventions.
 
@@ -1369,14 +1889,26 @@ def _extract_ifc_candidates(
       - level.elevation + height proxy (confidence 0.65)
       - Quantity set: Height, Length (confidence 0.75)
       - bbox.max_z - bbox.min_z (confidence 0.55)
-      - Storey elevation for IfcBuildingStorey (confidence 0.6)
+
+    NOTE: Storey elevation extraction is NOT done here.
+    IfcBuildingStorey elements appear 96 times in the flat pool (6 real +
+    90 back-reference stubs from contained elements). Calling
+    _try_extract_storey_elevation on all 96 produces 90 guaranteed stub
+    failures that mask whether the 6 real storeys have elevation data.
+    Storey elevation candidates are created in _normalize_elements using the
+    deduped storey records from collect_deduped_storeys() instead.
 
     Parking extraction:
       - "parking" in name/category (any IFC element)
+
+    Returns (area_candidates, height_candidates, parking_candidates,
+             non_floor_slab_excluded_count, slab_gfa_decisions)
     """
     area_candidates: list[AreaCandidate] = []
     height_candidates: list[HeightCandidate] = []
     parking_candidates: list[ParkingCandidate] = []
+    non_floor_slab_excluded_count: int = 0
+    slab_gfa_decisions: list[dict[str, Any]] = []
 
     for elem in elements:
         obj_id = str(elem.get("id") or "")
@@ -1407,7 +1939,10 @@ def _extract_ifc_candidates(
             ifc_class in _IFC_FLOOR_CLASSES
             or "slab" in ifc_type_field or "floor" in ifc_type_field
             or "space" in ifc_type_field or "plate" in ifc_type_field
-            or "slab" in type_val or "slab" in category
+            # "floor" in type_val catches elements where type = "Floor" (Revit
+            # category name, not IFC type) without an explicit ifcType field.
+            # E.g. "Floor:915 slab" on a direct IFC upload where ifcType is absent.
+            or "slab" in type_val or "floor" in type_val or "slab" in category
             or "space" in type_val or "space" in category
             or _speckle_type_contains(elem, "Floor")
         )
@@ -1417,13 +1952,51 @@ def _extract_ifc_candidates(
                 confidence = 0.85 if ("propert" in field or "quantit" in field) else 0.75
                 # Classify element family so GFA aggregation can prefer slabs over spaces
                 # and prevent counting the same floor plate twice.
+                elem_family = ""
                 if (
                     ifc_class in {"ifcslab", "ifcfloor", "ifcplate"}
                     or any(kw in ifc_type_field for kw in ("slab", "floor", "plate"))
                     or any(kw in type_val for kw in ("slab", "floor"))
                     or _speckle_type_contains(elem, "Floor")
                 ):
-                    elem_family = "slab"
+                    # Before accepting as a floor slab, check predefined type.
+                    # Roof slabs, foundation slabs, paving, and dimension-named
+                    # structural slab types (e.g. "915 slab") are NOT GFA.
+                    exclude, excl_reason = _is_non_floor_slab(
+                        ifc_type_field, name, elem
+                    )
+                    type_name = name.split(":")[1].strip() if ":" in name else ""
+                    if exclude:
+                        non_floor_slab_excluded_count += 1
+                        slab_gfa_decisions.append({
+                            "obj_id": obj_id,
+                            "name": name,
+                            "type_name": type_name,
+                            "level": str((elem.get("level") or {}).get("name", "") or ""),
+                            "area_m2": round(area, 4),
+                            "included": False,
+                            "reason": excl_reason,
+                            "extractor": "ifc",
+                        })
+                        log.debug(
+                            "_extract_ifc: excluded slab obj_id=%s "
+                            "from GFA (%s)",
+                            obj_id, excl_reason,
+                        )
+                        # Still process height candidates below — skip area only
+                        is_floor_like = False
+                    else:
+                        elem_family = "slab"
+                        slab_gfa_decisions.append({
+                            "obj_id": obj_id,
+                            "name": name,
+                            "type_name": type_name,
+                            "level": str((elem.get("level") or {}).get("name", "") or ""),
+                            "area_m2": round(area, 4),
+                            "included": True,
+                            "reason": "passed non-floor check",
+                            "extractor": "ifc",
+                        })
                 elif (
                     ifc_class == "ifcspace"
                     or "space" in ifc_type_field
@@ -1433,6 +2006,8 @@ def _extract_ifc_candidates(
                     elem_family = "space"
                 else:
                     elem_family = "slab"  # default for unclassified floor-like elements
+
+            if is_floor_like and area is not None and area > 0:
                 area_candidates.append(AreaCandidate(
                     source_obj_id=obj_id,
                     value_m2=area,
@@ -1452,12 +2027,6 @@ def _extract_ifc_candidates(
             or "wall" in type_val or "column" in type_val
             or "beam" in type_val or "member" in type_val
         )
-        is_storey = (
-            ifc_class in _IFC_STOREY_CLASSES
-            or "storey" in ifc_type_field or "story" in ifc_type_field
-            or "storey" in type_val or "story" in type_val
-        )
-
         if is_vertical:
             h, field = _try_extract_height_ifc(elem)
             if h is not None and h > 0:
@@ -1489,18 +2058,30 @@ def _extract_ifc_candidates(
                     connector_style="ifc",
                     height_kind=hkind,
                 ))
-        if is_storey:
-            elev = _try_extract_storey_elevation(elem)
-            if elev is not None and elev >= 0:
-                height_candidates.append(HeightCandidate(
-                    source_obj_id=obj_id,
-                    value_m=elev,
-                    units=None,
-                    confidence=0.6,
-                    source_field="storey.elevation",
-                    connector_style="ifc",
-                    height_kind="storey_elevation",
-                ))
+
+        # ── Roof peak candidates (P0 — beats per-element wall bbox.max_z) ──────
+        # For direct-upload IFC models the roof is modelled as IFCSLAB with a
+        # "Basic Roof:…" name/reference, not as IFCROOF.  These slabs do NOT
+        # enter the is_vertical path, so their bbox.max_z never makes it into
+        # the absolute_elevation pool.  Without this block the chimney (an
+        # IFCWALL with bbox.max_z=8.44) wins the P1 absolute_elevation race
+        # over the roof slabs (max_z=7.38).  This path explicitly promotes
+        # identifiable roof elements into a "roof_peak" tier that is resolved
+        # before the generic P1 pool in _derive_metrics_from_candidates.
+        if _is_identifiable_roof_element(elem):
+            bbox = elem.get("bbox") or {}
+            if isinstance(bbox, dict):
+                max_z = bbox.get("max_z")
+                if isinstance(max_z, (int, float)) and max_z > 0:
+                    height_candidates.append(HeightCandidate(
+                        source_obj_id=obj_id,
+                        value_m=float(max_z),
+                        units=None,
+                        confidence=0.70,
+                        source_field="roof_bbox.max_z",
+                        connector_style="ifc",
+                        height_kind="roof_peak",
+                    ))
 
         # ── Parking candidates ─────────────────────────────────
         if "parking" in name or "car park" in name or "carpark" in name or "parking" in category:
@@ -1510,7 +2091,13 @@ def _extract_ifc_candidates(
                 connector_style="ifc",
             ))
 
-    return area_candidates, height_candidates, parking_candidates
+    return (
+        area_candidates,
+        height_candidates,
+        parking_candidates,
+        non_floor_slab_excluded_count,
+        slab_gfa_decisions,
+    )
 
 
 def _detect_ifc_class(
@@ -1684,26 +2271,107 @@ def _try_extract_storey_elevation(elem: dict[str, Any]) -> float | None:
     Extracts the floor-level elevation of an IfcBuildingStorey element.
 
     Checks (in order):
-      1. elevation / RefElevation / refElevation — standard IFC storey fields
-      2. properties.RefElevation / properties.Elevation — property-set fallback
-      3. level.elevation — connector-mapped level object
+      1. elevation / Elevation / RefElevation / refElevation
+         — standard IFC storey fields; IFC spec uses "Elevation" (capital E),
+           Speckle connectors may lower-case it to "elevation", both are checked.
+      2. properties.RefElevation / properties.Elevation
+         — property-set fallback for some connector versions
+      3. properties.BaseQuantities.ElevationOfSSLRelative /
+         properties.BaseQuantities.ElevationOfFFLRelative
+         — IFC quantity-set path preserved on direct-upload DataObjects
+      4. level.elevation — connector-mapped level object
+      5. parameters.LEVEL_ELEV.value
+         — Revit connector parameter bag.  When an IFC model is opened in Revit
+           and synced via the Revit Speckle connector (rather than the IFC
+           connector), IfcBuildingStorey elements are mapped to Revit Levels and
+           synced as DataObjects with `ifcType = "IFCBUILDINGSTOREY"` plus a
+           Revit `parameters` bag.  The floor-level elevation lives in the
+           LEVEL_ELEV parameter, NOT as a top-level `elevation` attribute.
+      6. Broad properties scan — any property or property-set key whose name
+         contains "elevation" (case-insensitive).  Last resort for non-standard
+         connector/exporter combinations.
+
+    String coercion: all numeric checks also accept string representations of
+    numbers (e.g. "0", "-1200", "6400.0") because some Speckle IFC connector
+    versions serialise IfcBuildingStorey.Elevation as a string rather than a
+    numeric scalar.  Non-numeric strings are silently ignored.
     """
-    for field in ("elevation", "RefElevation", "refElevation"):
-        val = elem.get(field)
-        if isinstance(val, (int, float)):
-            return float(val)
-    # Some connectors nest RefElevation inside a property dict
+
+    def _to_float_or_none(v: Any) -> float | None:
+        """Converts int, float, or numeric string to float; returns None otherwise."""
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v.strip())
+            except (ValueError, AttributeError):
+                return None
+        return None
+
+    # Top-level IFC attribute (both casings)
+    for field in ("elevation", "Elevation", "RefElevation", "refElevation"):
+        val = _to_float_or_none(elem.get(field))
+        if val is not None:
+            return val
+
     props = elem.get("properties") or {}
     if isinstance(props, dict):
+        # Named property-set path
         for field in ("RefElevation", "Elevation"):
-            val = props.get(field)
-            if isinstance(val, (int, float)):
-                return float(val)
+            val = _to_float_or_none(props.get(field))
+            if val is not None:
+                return val
+        # BaseQuantities quantity-set path (direct IFC upload)
+        base_qty = props.get("BaseQuantities")
+        if isinstance(base_qty, dict):
+            for field in ("ElevationOfSSLRelative", "ElevationOfFFLRelative", "Elevation"):
+                val = _to_float_or_none(base_qty.get(field))
+                if val is not None:
+                    return val
+
     level = elem.get("level")
     if isinstance(level, dict):
-        elev = level.get("elevation")
-        if isinstance(elev, (int, float)):
-            return float(elev)
+        val = _to_float_or_none(level.get("elevation"))
+        if val is not None:
+            return val
+
+    # ── Revit parameter bag (IFC model synced via Revit connector) ────────────
+    # When Revit imports an IFC and the Revit Speckle connector syncs it,
+    # IfcBuildingStorey → Revit Level.  The level elevation is in the Revit
+    # parameter dict under LEVEL_ELEV, not as a direct `elevation` attribute.
+    params = elem.get("parameters") or {}
+    if isinstance(params, dict):
+        for param_key in ("LEVEL_ELEV", "Level Elevation", "LEVEL_ELEVATION"):
+            param = params.get(param_key)
+            if isinstance(param, dict):
+                val = _to_float_or_none(param.get("value"))
+                if val is not None:
+                    return val
+            else:
+                val = _to_float_or_none(param)
+                if val is not None:
+                    return val
+
+    # ── Broad properties scan (last resort) ───────────────────────────────────
+    # Catches non-standard property-set names that contain "elevation" as a
+    # substring, e.g. properties.PSet_BuildingStoreyCommon.ReferenceElevation
+    # or properties.StoreyData.FloorElevation from bespoke exporters.
+    # Two levels deep: top-level keys and one level of nested dicts.
+    # String coercion applied here too — same reason as above.
+    if isinstance(props, dict):
+        for key, raw_val in props.items():
+            if "elevation" in key.lower():
+                val = _to_float_or_none(raw_val)
+                if val is not None:
+                    return val
+        for pset_val in props.values():
+            if isinstance(pset_val, dict):
+                for key, raw_val in pset_val.items():
+                    if "elevation" in key.lower():
+                        val = _to_float_or_none(raw_val)
+                        if val is not None:
+                            return val
+
     return None
 
 
@@ -1827,6 +2495,109 @@ def _extract_global_bbox_height_candidate(
         connector_style="ifc",
         height_kind="bbox_extent",
     )
+
+
+def _infer_storey_elevations_from_owner_bbox(
+    elements: list[dict[str, Any]],
+) -> tuple[
+    dict[str, float],           # storey_id → inferred base elevation (raw, pre-normalization)
+    dict[str, int],             # storey_id → contributing element count
+    dict[str, list[str]],       # storey_id → list of contributing ifcType strings
+    dict[str, str],             # storey_id → storey name (if known from storey dicts)
+]:
+    """
+    Infers a base elevation for each storey by grouping IFC building elements
+    by their `ownerId` (which references the containing IfcBuildingStorey id)
+    and computing the minimum bbox.min_z across contained structural elements.
+
+    This is the fallback path for IFC models where IfcBuildingStorey.Elevation
+    was not serialized by the Speckle connector (e.g. direct-upload DataObjects
+    created by the Speckle IFC importer, which stores storey-level data only in
+    property sets rather than as a dedicated attribute).
+
+    Strategy:
+      - Only elements in _IFC_CLASSES_FOR_STOREY_BASE_INFERENCE contribute.
+        Furniture, MEP terminals, and proxies are excluded to avoid stray
+        objects pushing the inferred base below the true storey datum.
+      - The minimum bbox.min_z across all qualifying elements for a given owner
+        is taken as the storey base elevation.  Most floor-level structural
+        elements (walls, slabs, columns) have their base coincident with the
+        storey datum in a properly modelled IFC file.
+      - Elements without bbox or with non-numeric bbox are silently skipped.
+      - Elements without ownerId are ignored (cannot be attributed to a storey).
+
+    IMPORTANT: The returned elevations are in the raw model units (millimetres
+    for Revit-origin IFC files).  The caller is responsible for unit
+    normalisation via detect_and_normalize_units / the existing mm→m heuristic.
+
+    Returns:
+        storey_base_elevations — dict mapping storey_id (str) → raw min_z (float)
+        element_counts         — dict mapping storey_id → number of elements used
+        contributing_types     — dict mapping storey_id → list of ifcType strings
+        storey_names           — dict mapping storey_id → storey name from storey dict
+    """
+    # Pass 1 — collect storey names from the storey objects themselves
+    storey_names: dict[str, str] = {}
+    for elem in elements:
+        ifc_type_raw = str(elem.get("ifcType") or "").lower().strip()
+        if ifc_type_raw in _IFC_STOREY_CLASSES:
+            sid = str(elem.get("id") or "").strip()
+            sname = str(elem.get("name") or "").strip()
+            if sid and sname and sid not in storey_names:
+                storey_names[sid] = sname
+
+    # Pass 2 — group qualifying building elements by ownerId
+    # storey_id → list of (min_z, ifcType_str)
+    groups: dict[str, list[tuple[float, str]]] = {}
+
+    for elem in elements:
+        owner_id = str(elem.get("ownerId") or "").strip()
+        if not owner_id:
+            continue
+
+        ifc_type_raw = str(elem.get("ifcType") or "").lower().strip()
+        if not ifc_type_raw:
+            # Also accept elements where the ifcType is carried in the `type` field
+            ifc_type_raw = str(elem.get("type") or "").lower().strip()
+        if not ifc_type_raw:
+            continue
+
+        # Normalise: strip "ifc" prefix variants and dotted suffixes
+        # e.g. "ifcwallstandardcase" → kept as-is; "ifcslab.floor" → "ifcslab"
+        normalised_class = ifc_type_raw.split(".")[0]
+        if normalised_class not in _IFC_CLASSES_FOR_STOREY_BASE_INFERENCE:
+            continue
+
+        bbox = elem.get("bbox")
+        if not isinstance(bbox, dict):
+            continue
+        min_z = bbox.get("min_z")
+        if not isinstance(min_z, (int, float)):
+            continue
+
+        if owner_id not in groups:
+            groups[owner_id] = []
+        groups[owner_id].append((float(min_z), ifc_type_raw))
+
+    # Pass 3 — compute per-storey inferred base elevation
+    storey_base_elevations: dict[str, float] = {}
+    element_counts: dict[str, int] = {}
+    contributing_types: dict[str, list[str]] = {}
+
+    for storey_id, entries in groups.items():
+        if not entries:
+            continue
+        min_z_vals = [z for z, _ in entries]
+        base_z = min(min_z_vals)
+        storey_base_elevations[storey_id] = base_z
+        element_counts[storey_id] = len(entries)
+        seen_types: list[str] = []
+        for _, t in entries:
+            if t not in seen_types:
+                seen_types.append(t)
+        contributing_types[storey_id] = seen_types
+
+    return storey_base_elevations, element_counts, contributing_types, storey_names
 
 
 def _extract_generic_candidates(
@@ -1979,7 +2750,14 @@ def _derive_metrics_from_candidates(
 
     # ── Gross Floor Area (source-priority to prevent double-counting) ───────────
     valid_area = [c for c in candidates.area_candidates if c.value_m2 > 0]
-    gfa_diag: dict[str, Any] = {}
+    gfa_diag: dict[str, Any] = {
+        "slab_excluded_non_floor": candidates.slab_excluded_non_floor,
+        # Per-slab audit trail: one entry per unique slab object (deduplicated by
+        # obj_id in _normalize_elements; Revit extractor wins over IFC on overlap).
+        # Fields: obj_id, name, type_name, level, area_m2, included, reason, extractor.
+        "slab_decisions": candidates.slab_gfa_decisions,
+        "slab_decisions_count": len(candidates.slab_gfa_decisions),
+    }
 
     if valid_area:
         slab_cands    = [c for c in valid_area if c.element_family == "slab"]
@@ -2028,6 +2806,12 @@ def _derive_metrics_from_candidates(
                 if gfa_source == "slab" and space_cands
                 else ""
             )
+            non_floor_note = (
+                f"; {candidates.slab_excluded_non_floor} non-floor slab(s) "
+                f"excluded (roof/foundation/paving)"
+                if candidates.slab_excluded_non_floor
+                else ""
+            )
             metrics.append(GeometrySnapshotMetric(
                 key=MetricKey.GROSS_FLOOR_AREA_M2,
                 value=round(gfa, 2),
@@ -2035,7 +2819,8 @@ def _derive_metrics_from_candidates(
                 source_object_ids=floor_ids[:50],
                 computation_notes=(
                     f"Sum of {len(gfa_pool)} {gfa_source} candidate(s) "
-                    f"(connectors: {', '.join(styles)}){rejection_note}"
+                    f"(connectors: {', '.join(styles)})"
+                    f"{rejection_note}{non_floor_note}"
                 ),
             ))
             log.debug("_derive_metrics: GFA = %.2f m² from %d %s candidates", gfa, len(gfa_pool), gfa_source)
@@ -2051,12 +2836,28 @@ def _derive_metrics_from_candidates(
     #       (noise-filtered; single synthetic candidate from _normalize_elements)
     # P3 — storey_elevation
     #       IfcBuildingStorey floor levels → span + avg floor-to-floor
-    # P4 — element_dimension  (WEAK FALLBACK)
+    # P3b — storey_elevation_inferred (ownerId/bbox grouping)
+    # P4  — element_dimension  (WEAK FALLBACK)
     #       wall Height, BaseQuantities.Height, bbox extent of one element
     valid_height = [c for c in candidates.height_candidates if c.value_m > 0]
+    # P3b pool: inferred storey base elevations may include z=0 (ground floor)
+    # or negative values (sub-grade), which are excluded by the `> 0` filter
+    # above.  Build the inferred pool directly from the full candidate list.
+    inferred_storey_all = [
+        c for c in candidates.height_candidates
+        if c.height_kind == "storey_elevation_inferred"
+    ]
     height_diag: dict[str, Any] = {}
 
-    if valid_height:
+    if valid_height or inferred_storey_all:
+        # P0: roof peak — identifiable roof elements (IFCROOF or IFCSLAB whose
+        # name/reference marks it as a roof plane).  Wins over per-element
+        # wall/column bbox.max_z to prevent chimneys/fireplaces from setting
+        # building height.  Only bbox.max_z is used here (direct geometry read).
+        roof_pool = [
+            c for c in valid_height
+            if c.height_kind == "roof_peak"
+        ]
         abs_pool = [
             c for c in valid_height
             if c.height_kind in ("absolute_elevation", "computed_elevation")
@@ -2069,25 +2870,100 @@ def _derive_metrics_from_candidates(
             c for c in valid_height
             if c.height_kind == "storey_elevation"
         ]
+        # P3b: use full list (includes z=0 and sub-grade)
+        inferred_storey_pool = inferred_storey_all
         dim_pool = [
             c for c in valid_height
             if c.height_kind == "element_dimension"
         ]
 
-        height_diag["total_candidates"] = len(valid_height)
+        height_diag["total_candidates"] = len(valid_height) + len(
+            [c for c in inferred_storey_all if c.value_m <= 0]
+        )
         height_diag["by_kind"] = {
+            "roof_peak": len(roof_pool),
             "absolute_elevation": len(abs_pool),
             "bbox_extent": len(bbox_pool),
             "storey_elevation": len(storey_pool),
+            "storey_elevation_inferred": len(inferred_storey_pool),
             "element_dimension": len(dim_pool),
         }
+        height_diag["storey_elevations_found"] = (
+            len(storey_pool) > 0 or len(inferred_storey_pool) > 0
+        )
+        height_diag["storey_elevation"] = max(
+            (c.value_m for c in inferred_storey_pool), default=0
+        )
 
         chosen_height_m: float | None = None
         height_note: str = ""
         is_weak_fallback = False
 
+        # P0 — highest identified roof element
+        # Uses the highest bbox.max_z across all roof_peak candidates.
+        # This is preferred over the generic P1 abs_pool because the abs_pool
+        # includes walls/columns, and the tallest wall may be a chimney or
+        # fireplace projection rather than the building top.
+        if roof_pool:
+            best = max(roof_pool, key=lambda c: c.value_m)
+            chosen_height_m = best.value_m
+            # Identify which abs_pool candidate would have won without this rule
+            abs_would_have_won = (
+                max(abs_pool, key=lambda c: c.value_m)
+                if abs_pool else None
+            )
+            override_note = ""
+            if (
+                abs_would_have_won is not None
+                and abs_would_have_won.value_m > best.value_m
+            ):
+                override_note = (
+                    f" (overrides abs_pool winner "
+                    f"id={abs_would_have_won.source_obj_id[:12]} "
+                    f"max_z={abs_would_have_won.value_m:.3f}m — "
+                    f"non-roof vertical element excluded from building-height)"
+                )
+            height_note = (
+                f"roof_bbox.max_z = {best.value_m:.3f} m "
+                f"(highest identified roof element: "
+                f"id={best.source_obj_id[:12]}, "
+                f"confidence={best.confidence:.2f}, "
+                f"connector={best.connector_style})"
+                f"{override_note}"
+            )
+            height_diag["chosen_source_tier"] = "roof_peak"
+            height_diag["chosen_source_kind"] = "roof_peak"
+            height_diag["chosen_source"] = "roof_bbox.max_z"
+            height_diag["chosen_source_obj_id"] = best.source_obj_id
+            height_diag["roof_candidates_found"] = len(roof_pool)
+            height_diag["whole_building_source"] = True
+            height_diag["rejected_kinds"] = [
+                k for k, pool in (
+                    ("absolute_elevation", abs_pool),
+                    ("bbox_extent", bbox_pool),
+                    ("storey_elevation", storey_pool),
+                    ("storey_elevation_inferred", inferred_storey_pool),
+                    ("element_dimension", dim_pool),
+                ) if pool
+            ]
+            if abs_would_have_won is not None and abs_would_have_won.value_m > best.value_m:
+                height_diag["chimney_suppressed"] = {
+                    "obj_id": abs_would_have_won.source_obj_id,
+                    "max_z": abs_would_have_won.value_m,
+                    "reason": "non-roof vertical element (wall/column) excluded "
+                              "from building-height when roof candidates exist",
+                }
+            log.info(
+                "_derive_metrics: height from roof_peak — "
+                "best_max_z=%.3fm id=%s roof_candidates=%d%s",
+                best.value_m, best.source_obj_id, len(roof_pool),
+                f" (overrides chimney/non-roof max_z={abs_would_have_won.value_m:.3f}m)"
+                if abs_would_have_won and abs_would_have_won.value_m > best.value_m
+                else "",
+            )
+
         # P1 — absolute / computed elevations
-        if abs_pool:
+        elif abs_pool:
             best = max(abs_pool, key=lambda c: c.value_m)
             chosen_height_m = best.value_m
             height_note = (
@@ -2104,6 +2980,7 @@ def _derive_metrics_from_candidates(
                 k for k, pool in (
                     ("bbox_extent", bbox_pool),
                     ("storey_elevation", storey_pool),
+                    ("storey_elevation_inferred", inferred_storey_pool),
                     ("element_dimension", dim_pool),
                 ) if pool
             ]
@@ -2126,11 +3003,12 @@ def _derive_metrics_from_candidates(
             height_diag["rejected_kinds"] = [
                 k for k, pool in (
                     ("storey_elevation", storey_pool),
+                    ("storey_elevation_inferred", inferred_storey_pool),
                     ("element_dimension", dim_pool),
                 ) if pool
             ]
 
-        # P3 — storey elevation based inference
+        # P3a — native storey elevation (IfcBuildingStorey.Elevation attribute)
         elif storey_pool:
             elevs = sorted(c.value_m for c in storey_pool)
             storey_count = len(elevs)
@@ -2143,7 +3021,7 @@ def _derive_metrics_from_candidates(
             # Building top ≈ span + one avg floor-to-floor for roof/top slab
             chosen_height_m = round(storey_span + avg_ff, 2)
             height_note = (
-                f"storey.elevation: {storey_count} distinct storey(s), "
+                f"storey.elevation (native IFC): {storey_count} distinct storey(s), "
                 f"span={storey_span:.2f}m + "
                 f"avg_floor_to_floor={avg_ff:.2f}m "
                 f"→ estimated_top={chosen_height_m:.2f}m"
@@ -2158,13 +3036,59 @@ def _derive_metrics_from_candidates(
             height_diag["avg_floor_to_floor_m"] = round(avg_ff, 2)
             height_diag["rejected_kinds"] = [
                 k for k, pool in (
+                    ("storey_elevation_inferred", inferred_storey_pool),
                     ("element_dimension", dim_pool),
                 ) if pool
             ]
             log.info(
-                "_derive_metrics: height from %d storey elevation(s) — "
+                "_derive_metrics: height from %d native storey elevation(s) — "
                 "span=%.2fm avg_ff=%.2fm estimated_top=%.2fm",
                 storey_count, storey_span, avg_ff, chosen_height_m,
+            )
+
+        # P3b — inferred storey base elevations from ownerId/bbox grouping
+        # The inferred values are absolute Z positions (not heights), so we
+        # compute building height as storey span + avg floor-to-floor, exactly
+        # as for P3a.  z=0 (ground floor) and sub-grade values are included
+        # because this pool is built from the unfiltered candidate list.
+        elif inferred_storey_pool:
+            elevs = sorted(c.value_m for c in inferred_storey_pool)
+            storey_count = len(elevs)
+            storey_span = elevs[-1] - elevs[0]
+            avg_ff = (
+                storey_span / (storey_count - 1)
+                if storey_count >= 2
+                else 3.5
+            )
+            chosen_height_m = round(storey_span + avg_ff, 2)
+            height_note = (
+                f"storey_base.inferred_from_owner_bbox: "
+                f"{storey_count} inferred storey base(s) "
+                f"(from element bbox.min_z grouped by ownerId — "
+                f"NOT native IfcBuildingStorey.Elevation), "
+                f"elevations={[round(e, 3) for e in elevs]}m, "
+                f"span={storey_span:.2f}m + "
+                f"avg_floor_to_floor={avg_ff:.2f}m "
+                f"→ estimated_top={chosen_height_m:.2f}m"
+            )
+            height_diag["chosen_source_tier"] = "storey_elevation_inferred_estimated"
+            height_diag["chosen_source_kind"] = "storey_elevation_inferred"
+            height_diag["chosen_source"] = "storey_base.inferred_from_owner_bbox"
+            height_diag["whole_building_source"] = True
+            height_diag["storey_count"] = storey_count
+            height_diag["storey_elevations"] = elevs
+            height_diag["storey_span_m"] = round(storey_span, 2)
+            height_diag["avg_floor_to_floor_m"] = round(avg_ff, 2)
+            height_diag["rejected_kinds"] = [
+                k for k, pool in (
+                    ("element_dimension", dim_pool),
+                ) if pool
+            ]
+            log.info(
+                "_derive_metrics: height from %d inferred storey base(s) "
+                "(ownerId/bbox) — "
+                "elevs=%s span=%.2fm avg_ff=%.2fm estimated_top=%.2fm",
+                storey_count, elevs, storey_span, avg_ff, chosen_height_m,
             )
 
         # P4 — element dimension (weak fallback)

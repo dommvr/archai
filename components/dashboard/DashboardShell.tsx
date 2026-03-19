@@ -5,6 +5,7 @@ import { Topbar } from './Topbar'
 import { Sidebar } from './Sidebar'
 import { StatusBar } from './StatusBar'
 import { CommandPalette } from './CommandPalette'
+import { PremiumBillingModal } from './PremiumBillingModal'
 import type { AuthUser, Project } from '@/types'
 
 // UserContext — distributes the SSR-fetched user to client components
@@ -30,6 +31,8 @@ interface DashboardShellProps {
   user: AuthUser | null
   initialProjects: Project[]
   children: React.ReactNode
+  /** When true, show the premium billing continuation modal once on mount. */
+  showBillingPrompt?: boolean
 }
 
 /**
@@ -49,10 +52,13 @@ interface DashboardShellProps {
  * via useParams() in Topbar and Sidebar so that navigation is the
  * single source of truth.
  */
-export function DashboardShell({ user, initialProjects, children }: DashboardShellProps) {
+export function DashboardShell({ user, initialProjects, children, showBillingPrompt = false }: DashboardShellProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [projects, setProjects] = useState<Project[]>(initialProjects)
+  // billingModalOpen initialises from the server-computed showBillingPrompt flag.
+  // Once dismissed it stays closed for this session (and forever via the DB flag).
+  const [billingModalOpen, setBillingModalOpen] = useState(showBillingPrompt)
 
   const addProject = (project: Project) => {
     setProjects((prev) => [project, ...prev])
@@ -89,6 +95,12 @@ export function DashboardShell({ user, initialProjects, children }: DashboardShe
 
           {/* Command Palette */}
           <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+
+          {/* Premium billing continuation — shown once on first sign-in for premium-intent users */}
+          <PremiumBillingModal
+            open={billingModalOpen}
+            onClose={() => setBillingModalOpen(false)}
+          />
         </div>
       </ProjectContext.Provider>
     </UserContext.Provider>
