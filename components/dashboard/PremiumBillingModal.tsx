@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
 import {
-  Sparkles, Check, CreditCard, ArrowRight, X, Loader2, ShieldCheck,
+  Sparkles, Check, CreditCard, ArrowRight, Loader2, ShieldCheck,
 } from 'lucide-react'
 import {
   Dialog,
@@ -70,23 +70,13 @@ export function PremiumBillingModal({ open, onClose }: PremiumBillingModalProps)
           </div>
 
           {/* Heading */}
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <DialogTitle className="text-xl leading-snug">
-                Complete your Premium setup
-              </DialogTitle>
-              <DialogDescription className="mt-1">
-                You selected Premium during signup. Activate your plan to unlock the full toolset.
-              </DialogDescription>
-            </div>
-            <button
-              type="button"
-              aria-label="Close"
-              onClick={() => dismiss('later')}
-              className="mt-0.5 rounded-sm opacity-60 hover:opacity-100 transition-opacity focus:outline-none focus:ring-2 focus:ring-archai-orange/50 shrink-0"
-            >
-              <X className="h-4 w-4 text-muted-foreground" />
-            </button>
+          <div>
+            <DialogTitle className="text-xl leading-snug">
+              Complete your Premium setup
+            </DialogTitle>
+            <DialogDescription className="mt-1">
+              You selected Premium during signup. Activate your plan to unlock the full toolset.
+            </DialogDescription>
           </div>
         </DialogHeader>
 

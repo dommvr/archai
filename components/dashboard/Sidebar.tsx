@@ -1,37 +1,78 @@
 'use client'
 
+import { useState } from 'react'
 import { usePathname, useParams } from 'next/navigation'
 import Link from 'next/link'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  LayoutDashboard, Map, Box, Grid3x3, Activity, Columns2,
-  Leaf, BookOpen, FileText, PenLine, Download, ChevronLeft, ChevronRight,
+  LayoutDashboard,
+  Box,
+  FileText,
+  PlaySquare,
+  Settings,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  Map,
+  Grid3x3,
+  Activity,
+  Columns2,
+  Leaf,
+  BookOpen,
+  PenLine,
+  Download,
+  Eye,
 } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { Separator } from '@/components/ui/separator'
-import type { NavItem } from '@/types'
 
-const ICON_MAP = {
-  LayoutDashboard, Map, Box, Grid3x3, Activity, Columns2,
-  Leaf, BookOpen, FileText, PenLine, Download,
+// ── Project-level section items ───────────────────────────────────────────────
+
+interface SectionItem {
+  id: string
+  label: string
+  Icon: React.ComponentType<{ className?: string }>
+  segment: string  // URL segment relative to /dashboard/projects/[id]/
 }
 
-type IconName = keyof typeof ICON_MAP
-
-const NAV_ITEMS: (NavItem & { iconName: IconName })[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard', iconName: 'LayoutDashboard', href: '/dashboard' },
-  { id: 'precheck', label: 'Zoning & Permit Check', icon: 'Map', iconName: 'Map', href: '/dashboard/precheck' },
-  { id: 'massing-generator', label: 'Massing Generator', icon: 'Box', iconName: 'Box', href: '/dashboard/massing' },
-  { id: 'space-planner', label: 'Space Planner', icon: 'Grid3x3', iconName: 'Grid3x3', href: '/dashboard/space-planner' },
-  { id: 'live-metrics', label: 'Live Metrics', icon: 'Activity', iconName: 'Activity', href: '/dashboard/metrics' },
-  { id: 'option-comparison', label: 'Option Comparison', icon: 'Columns2', iconName: 'Columns2', href: '/dashboard/comparison' },
-  { id: 'sustainability-copilot', label: 'Sustainability Copilot', icon: 'Leaf', iconName: 'Leaf', href: '/dashboard/sustainability' },
-  { id: 'firm-knowledge', label: 'Firm Knowledge Base', icon: 'BookOpen', iconName: 'BookOpen', href: '/dashboard/knowledge' },
-  { id: 'brief-translator', label: 'Brief Translator', icon: 'FileText', iconName: 'FileText', href: '/dashboard/brief' },
-  { id: 'spec-writer', label: 'Spec Writer', icon: 'PenLine', iconName: 'PenLine', href: '/dashboard/specs' },
-  { id: 'export-sync', label: 'Export & Revit Sync', icon: 'Download', iconName: 'Download', href: '/dashboard/export' },
+const PROJECT_SECTIONS: SectionItem[] = [
+  { id: 'overview',   label: 'Overview',   Icon: LayoutDashboard, segment: ''          },
+  { id: 'viewer',     label: 'Viewer',     Icon: Eye,             segment: 'viewer'    },
+  { id: 'models',     label: 'Models',     Icon: Box,             segment: 'models'    },
+  { id: 'documents',  label: 'Documents',  Icon: FileText,        segment: 'documents' },
+  { id: 'runs',       label: 'Runs',       Icon: PlaySquare,      segment: 'runs'      },
 ]
+
+// ── Tool sub-items (shown collapsed under "Tools") ────────────────────────────
+
+interface ToolItem {
+  id: string
+  label: string
+  Icon: React.ComponentType<{ className?: string }>
+  segment: string
+}
+
+const TOOL_ITEMS: ToolItem[] = [
+  { id: 'precheck',              label: 'Zoning & Code Check',    Icon: Map,        segment: 'precheck'      },
+  { id: 'massing-generator',     label: 'Massing Generator',      Icon: Box,        segment: 'massing'       },
+  { id: 'space-planner',         label: 'Space Planner',          Icon: Grid3x3,    segment: 'space-planner' },
+  { id: 'live-metrics',          label: 'Live Metrics',           Icon: Activity,   segment: 'metrics'       },
+  { id: 'option-comparison',     label: 'Option Comparison',      Icon: Columns2,   segment: 'comparison'    },
+  { id: 'sustainability-copilot',label: 'Sustainability Copilot', Icon: Leaf,       segment: 'sustainability' },
+  { id: 'firm-knowledge',        label: 'Firm Knowledge',         Icon: BookOpen,   segment: 'knowledge'     },
+  { id: 'brief-translator',      label: 'Brief Translator',       Icon: FileText,   segment: 'brief'         },
+  { id: 'spec-writer',           label: 'Spec Writer',            Icon: PenLine,    segment: 'specs'         },
+  { id: 'export-sync',           label: 'Export & Sync',          Icon: Download,   segment: 'export'        },
+]
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function sectionHref(projectId: string | null, segment: string): string {
+  if (!projectId) return '/dashboard'
+  const base = `/dashboard/projects/${projectId}`
+  return segment ? `${base}/${segment}` : base
+}
 
 interface SidebarProps {
   collapsed: boolean
@@ -43,20 +84,21 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const params = useParams<{ projectId?: string }>()
   const projectId = params.projectId ?? null
 
-  /**
-   * Compute the real href for each nav item.
-   * dashboard and precheck use project-scoped routes when a projectId is in the URL.
-   * All other items keep their static stub hrefs.
-   */
-  const computeHref = (item: (typeof NAV_ITEMS)[number]): string => {
-    if (item.id === 'dashboard') {
-      return projectId ? `/dashboard/projects/${projectId}` : '/dashboard'
-    }
-    if (item.id === 'precheck') {
-      return projectId ? `/dashboard/projects/${projectId}/precheck` : '/dashboard/precheck'
-    }
-    return item.href
+  // Tools group starts expanded when a tool route is active
+  const isOnToolRoute = TOOL_ITEMS.some((t) =>
+    projectId && pathname.startsWith(`/dashboard/projects/${projectId}/${t.segment}`)
+  )
+  const [toolsOpen, setToolsOpen] = useState(isOnToolRoute)
+
+  function isActive(segment: string): boolean {
+    if (!projectId) return false
+    const href = sectionHref(projectId, segment)
+    // Overview: exact match only so it doesn't highlight on sub-routes
+    if (segment === '') return pathname === href
+    return pathname === href || pathname.startsWith(href + '/')
   }
+
+  const noProject = !projectId
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -66,38 +108,32 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         className="h-full bg-archai-charcoal border-r border-archai-graphite flex flex-col overflow-hidden shrink-0"
         aria-label="Main navigation"
       >
-        {/* Nav Items */}
         <div className="flex-1 py-3 space-y-0.5 overflow-y-auto overflow-x-hidden px-2">
-          {NAV_ITEMS.map((item) => {
-            const Icon = ICON_MAP[item.iconName]
-            const href = computeHref(item)
-            // Dashboard: exact match only — startsWith would activate on all project sub-routes.
-            // All others: prefix match so nested pages keep the item highlighted.
-            const isActive =
-              item.id === 'dashboard'
-                ? pathname === href ||
-                  (projectId != null && pathname === `/dashboard/projects/${projectId}`)
-                : pathname === href || pathname.startsWith(href)
 
+          {/* ── Project sections ─────────────────────────── */}
+          {PROJECT_SECTIONS.map(({ id, label, Icon, segment }) => {
+            const href = sectionHref(projectId, segment)
+            const active = isActive(segment)
             return (
-              <Tooltip key={item.id}>
+              <Tooltip key={id}>
                 <TooltipTrigger asChild>
                   <Link
-                    href={href}
+                    href={noProject ? '/dashboard' : href}
                     className={cn(
                       'flex items-center gap-3 rounded-md px-2 py-2 text-xs transition-all duration-150 group',
-                      isActive
+                      active
                         ? 'bg-archai-orange/10 text-archai-orange border border-archai-orange/20'
-                        : 'text-muted-foreground hover:bg-archai-graphite hover:text-white'
+                        : noProject
+                          ? 'text-muted-foreground/40 pointer-events-none'
+                          : 'text-muted-foreground hover:bg-archai-graphite hover:text-white',
                     )}
-                    aria-current={isActive ? 'page' : undefined}
+                    aria-current={active ? 'page' : undefined}
+                    tabIndex={noProject ? -1 : 0}
                   >
-                    <Icon
-                      className={cn(
-                        'h-4 w-4 shrink-0',
-                        isActive ? 'text-archai-orange' : 'text-muted-foreground group-hover:text-white'
-                      )}
-                    />
+                    <Icon className={cn(
+                      'h-4 w-4 shrink-0',
+                      active ? 'text-archai-orange' : 'text-muted-foreground group-hover:text-white',
+                    )} />
                     <AnimatePresence>
                       {!collapsed && (
                         <motion.span
@@ -107,20 +143,170 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                           transition={{ duration: 0.2 }}
                           className="whitespace-nowrap overflow-hidden font-medium"
                         >
-                          {item.label}
+                          {label}
                         </motion.span>
                       )}
                     </AnimatePresence>
                   </Link>
                 </TooltipTrigger>
                 {collapsed && (
-                  <TooltipContent side="right" className="text-xs">
-                    {item.label}
-                  </TooltipContent>
+                  <TooltipContent side="right" className="text-xs">{label}</TooltipContent>
                 )}
               </Tooltip>
             )
           })}
+
+          {/* ── Separator before Tools ───────────────────── */}
+          <div className="py-1">
+            <Separator />
+          </div>
+
+          {/* ── Tools collapsible group ──────────────────── */}
+          {collapsed ? (
+            /* In collapsed mode show each tool icon directly */
+            TOOL_ITEMS.map(({ id, label, Icon, segment }) => {
+              const href = sectionHref(projectId, segment)
+              const active = isActive(segment)
+              return (
+                <Tooltip key={id}>
+                  <TooltipTrigger asChild>
+                    <Link
+                      href={noProject ? '/dashboard' : href}
+                      className={cn(
+                        'flex items-center gap-3 rounded-md px-2 py-2 text-xs transition-all duration-150 group',
+                        active
+                          ? 'bg-archai-orange/10 text-archai-orange border border-archai-orange/20'
+                          : noProject
+                            ? 'text-muted-foreground/40 pointer-events-none'
+                            : 'text-muted-foreground hover:bg-archai-graphite hover:text-white',
+                      )}
+                      aria-current={active ? 'page' : undefined}
+                      tabIndex={noProject ? -1 : 0}
+                    >
+                      <Icon className={cn(
+                        'h-4 w-4 shrink-0',
+                        active ? 'text-archai-orange' : 'text-muted-foreground group-hover:text-white',
+                      )} />
+                    </Link>
+                  </TooltipTrigger>
+                  <TooltipContent side="right" className="text-xs">{label}</TooltipContent>
+                </Tooltip>
+              )
+            })
+          ) : (
+            /* Expanded: show collapsible Tools group */
+            <>
+              <button
+                onClick={() => setToolsOpen((v) => !v)}
+                className={cn(
+                  'w-full flex items-center gap-3 rounded-md px-2 py-2 text-xs transition-colors group',
+                  isOnToolRoute
+                    ? 'text-archai-orange'
+                    : 'text-muted-foreground hover:bg-archai-graphite hover:text-white',
+                )}
+                aria-expanded={toolsOpen}
+              >
+                <PlaySquare className={cn(
+                  'h-4 w-4 shrink-0',
+                  isOnToolRoute ? 'text-archai-orange' : 'text-muted-foreground group-hover:text-white',
+                )} />
+                <span className="flex-1 text-left font-medium whitespace-nowrap overflow-hidden">Tools</span>
+                <ChevronDown className={cn(
+                  'h-3 w-3 shrink-0 transition-transform',
+                  toolsOpen && 'rotate-180',
+                )} />
+              </button>
+
+              <AnimatePresence initial={false}>
+                {toolsOpen && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="overflow-hidden pl-3 space-y-0.5"
+                  >
+                    {TOOL_ITEMS.map(({ id, label, Icon, segment }) => {
+                      const href = sectionHref(projectId, segment)
+                      const active = isActive(segment)
+                      return (
+                        <Link
+                          key={id}
+                          href={noProject ? '/dashboard' : href}
+                          className={cn(
+                            'flex items-center gap-3 rounded-md px-2 py-1.5 text-xs transition-all duration-150 group',
+                            active
+                              ? 'bg-archai-orange/10 text-archai-orange border border-archai-orange/20'
+                              : noProject
+                                ? 'text-muted-foreground/40 pointer-events-none'
+                                : 'text-muted-foreground hover:bg-archai-graphite hover:text-white',
+                          )}
+                          aria-current={active ? 'page' : undefined}
+                          tabIndex={noProject ? -1 : 0}
+                        >
+                          <Icon className={cn(
+                            'h-3.5 w-3.5 shrink-0',
+                            active ? 'text-archai-orange' : 'text-muted-foreground group-hover:text-white',
+                          )} />
+                          <span className="whitespace-nowrap overflow-hidden font-medium">{label}</span>
+                        </Link>
+                      )
+                    })}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </>
+          )}
+
+          {/* ── Settings at bottom ───────────────────────── */}
+          <div className="py-1">
+            <Separator />
+          </div>
+
+          {(() => {
+            const href = sectionHref(projectId, 'settings')
+            const active = isActive('settings')
+            return (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Link
+                    href={noProject ? '/dashboard' : href}
+                    className={cn(
+                      'flex items-center gap-3 rounded-md px-2 py-2 text-xs transition-all duration-150 group',
+                      active
+                        ? 'bg-archai-orange/10 text-archai-orange border border-archai-orange/20'
+                        : noProject
+                          ? 'text-muted-foreground/40 pointer-events-none'
+                          : 'text-muted-foreground hover:bg-archai-graphite hover:text-white',
+                    )}
+                    aria-current={active ? 'page' : undefined}
+                    tabIndex={noProject ? -1 : 0}
+                  >
+                    <Settings className={cn(
+                      'h-4 w-4 shrink-0',
+                      active ? 'text-archai-orange' : 'text-muted-foreground group-hover:text-white',
+                    )} />
+                    <AnimatePresence>
+                      {!collapsed && (
+                        <motion.span
+                          initial={{ opacity: 0, width: 0 }}
+                          animate={{ opacity: 1, width: 'auto' }}
+                          exit={{ opacity: 0, width: 0 }}
+                          transition={{ duration: 0.2 }}
+                          className="whitespace-nowrap overflow-hidden font-medium"
+                        >
+                          Settings
+                        </motion.span>
+                      )}
+                    </AnimatePresence>
+                  </Link>
+                </TooltipTrigger>
+                {collapsed && (
+                  <TooltipContent side="right" className="text-xs">Settings</TooltipContent>
+                )}
+              </Tooltip>
+            )
+          })()}
         </div>
 
         {/* Collapse toggle */}

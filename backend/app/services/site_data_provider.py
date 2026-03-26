@@ -113,7 +113,7 @@ class SiteDataProviderService:
 
     async def normalize_site_context(
         self,
-        run_id: UUID,
+        run_id: UUID | None,
         project_id: UUID,
         request: IngestSiteRequest,
     ) -> SiteContext:

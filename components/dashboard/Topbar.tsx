@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useContext } from 'react'
+import { useState, useContext, useEffect, useCallback, useRef } from 'react'
 import { useRouter, useParams, usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -29,13 +29,21 @@ import {
   CreditCard,
   FolderOpen,
   Loader2,
-  Trash2,
+  Pin,
+  PinOff,
+  LayoutGrid,
+  RefreshCw,
   UserCog,
 } from 'lucide-react'
 import { signOut } from '@/lib/actions/auth'
-import { createProject, deleteProject } from '@/lib/actions/projects'
+import { createProject } from '@/lib/actions/projects'
 import { UserContext, ProjectContext } from './DashboardShell'
+import { AllProjectsDialog } from './AllProjectsDialog'
+import { ProjectModelSyncDialog } from './ProjectModelSyncDialog'
+import { useProjectMeta, sortProjectsForSwitcher } from '@/hooks/useProjectMeta'
+import * as precheckApi from '@/lib/precheck/api'
 import type { Project } from '@/types'
+import type { SpeckleModelRef } from '@/lib/precheck/types'
 
 interface TopbarProps {
   onAddTool: () => void
@@ -43,32 +51,73 @@ interface TopbarProps {
 
 export function Topbar({ onAddTool }: TopbarProps) {
   const user = useContext(UserContext)
-  const { projects, addProject, removeProject } = useContext(ProjectContext)
+  const { projects, addProject } = useContext(ProjectContext)
   const router = useRouter()
   const pathname = usePathname()
 
-  // The active project is the one whose ID is in the current URL.
   const params = useParams<{ projectId?: string }>()
   const currentProjectId = params.projectId ?? null
   const activeProject = projects.find((p) => p.id === currentProjectId) ?? null
 
+  const { recordOpened, togglePin, getProjectMeta } = useProjectMeta()
+
+  // Force re-render when pin state changes (stored in localStorage)
+  const [pinRevision, setPinRevision] = useState(0)
+
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
-  const [dialogOpen, setDialogOpen] = useState(false)
+  const [allProjectsOpen, setAllProjectsOpen] = useState(false)
+  const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
-  const [projectPendingDeletion, setProjectPendingDeletion] = useState<Project | null>(null)
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [syncModelOpen, setSyncModelOpen] = useState(false)
 
-  const userInitials = user?.email
-    ? user.email.slice(0, 2).toUpperCase()
-    : 'U'
+  // Active model ref for the current project — used to power "Sync/Resync" button
+  const [activeModelRef, setActiveModelRef] = useState<SpeckleModelRef | null>(null)
+  // resyncing stays true until syncedAt transitions from null → value (real completion).
+  const [resyncing, setResyncing] = useState(false)
+  const resyncPollTimer   = useRef<ReturnType<typeof setInterval> | null>(null)
+  const resyncPollDeadline = useRef<ReturnType<typeof setTimeout>  | null>(null)
+
+  // Clear polling on unmount
+  useEffect(() => {
+    return () => {
+      if (resyncPollTimer.current)   clearInterval(resyncPollTimer.current)
+      if (resyncPollDeadline.current) clearTimeout(resyncPollDeadline.current)
+    }
+  }, [])
+
+  // Record last-opened whenever the active project changes
+  useEffect(() => {
+    if (currentProjectId) recordOpened(currentProjectId)
+  }, [currentProjectId, recordOpened])
+
+  // Fetch active model ref so "Resync" knows the current streamId/versionId
+  const refreshActiveModelRef = useCallback((projectId: string) => {
+    precheckApi.getProjectActiveModelRef(projectId)
+      .then((ref) => setActiveModelRef(ref ?? null))
+      .catch(() => setActiveModelRef(null))
+  }, [])
+
+  useEffect(() => {
+    if (currentProjectId) {
+      refreshActiveModelRef(currentProjectId)
+    } else {
+      setActiveModelRef(null)
+    }
+  }, [currentProjectId, refreshActiveModelRef])
+
+  const displayName =
+    (user?.user_metadata?.full_name as string | undefined) ??
+    (user?.user_metadata?.name as string | undefined) ??
+    null
+
+  const userInitials = displayName
+    ? displayName.trim().split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase()
+    : (user?.email ? user.email.slice(0, 2).toUpperCase() : 'U')
 
   /**
-   * Build the target URL for a project, preserving the current tool segment
-   * so that switching projects in precheck goes to the new project's precheck.
+   * Preserve the tool segment when switching projects.
    * e.g. /dashboard/projects/old-id/precheck → /dashboard/projects/new-id/precheck
    */
   const routeForProject = (projectId: string): string => {
@@ -77,89 +126,101 @@ export function Topbar({ onAddTool }: TopbarProps) {
     return `/dashboard/projects/${projectId}${toolSuffix}`
   }
 
-  const handleSelectProject = (project: Project) => {
+  const handleSelectProject = (projectId: string) => {
     setProjectMenuOpen(false)
-    if (project.id === currentProjectId) return
-    router.push(routeForProject(project.id))
+    if (projectId === currentProjectId) return
+    recordOpened(projectId)
+    router.push(routeForProject(projectId))
+  }
+
+  const handlePin = (e: React.MouseEvent, projectId: string) => {
+    e.stopPropagation()
+    togglePin(projectId)
+    setPinRevision((v) => v + 1)
   }
 
   const openNewProjectDialog = () => {
     setProjectMenuOpen(false)
     setNewProjectName('')
     setCreateError(null)
-    setDialogOpen(true)
+    setNewProjectDialogOpen(true)
   }
 
-  const openDeleteDialog = (project: Project) => {
-    setProjectMenuOpen(false)
-    setProjectPendingDeletion(project)
-    setDeleteError(null)
-    setDeleteDialogOpen(true)
+  /**
+   * Sync/Resync the project's current active model (triggers geometry extraction).
+   * Only available when an active model ref exists.
+   *
+   * The backend returns immediately — the actual extraction runs in the background.
+   * We poll GET active-model until syncedAt changes, then clear the resyncing state.
+   * This ensures the button stays in "syncing" state for the full real duration.
+   */
+  async function handleResync() {
+    if (!currentProjectId || !activeModelRef || resyncing) return
+    setResyncing(true)
+
+    try {
+      await precheckApi.syncProjectModel({
+        projectId:  currentProjectId,
+        streamId:   activeModelRef.streamId,
+        versionId:  activeModelRef.versionId,
+        branchName: activeModelRef.branchName ?? undefined,
+        modelName:  activeModelRef.modelName  ?? undefined,
+      })
+    } catch {
+      // Network / backend error — stop spinner immediately
+      setResyncing(false)
+      return
+    }
+
+    // Poll until syncedAt appears (background task complete) or 90s timeout.
+    const POLL_MS    = 2_500
+    const TIMEOUT_MS = 90_000
+
+    resyncPollDeadline.current = setTimeout(() => {
+      if (resyncPollTimer.current) clearInterval(resyncPollTimer.current)
+      resyncPollTimer.current = null
+      setResyncing(false)
+      if (currentProjectId) refreshActiveModelRef(currentProjectId)
+    }, TIMEOUT_MS)
+
+    resyncPollTimer.current = setInterval(async () => {
+      try {
+        const ref = await precheckApi.getProjectActiveModelRef(currentProjectId)
+        if (ref?.syncedAt) {
+          // Real sync complete
+          if (resyncPollTimer.current)   clearInterval(resyncPollTimer.current)
+          if (resyncPollDeadline.current) clearTimeout(resyncPollDeadline.current)
+          resyncPollTimer.current   = null
+          resyncPollDeadline.current = null
+          setActiveModelRef(ref)
+          setResyncing(false)
+        }
+      } catch {
+        // Network error — keep polling
+      }
+    }, POLL_MS)
   }
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!newProjectName.trim() || creating) return
-
     setCreating(true)
     setCreateError(null)
-
     const { project, error } = await createProject(newProjectName)
-
     setCreating(false)
-
     if (error || !project) {
       setCreateError(error ?? 'Failed to create project.')
       return
     }
-
     addProject(project)
-    setDialogOpen(false)
-    // Always land on the new project's dashboard overview, never preserving the
-    // current tool route — the new project has no data yet.
+    setNewProjectDialogOpen(false)
     router.push(`/dashboard/projects/${project.id}`)
   }
 
-  const closeDeleteDialog = (open: boolean) => {
-    if (deleting) return
-    setDeleteDialogOpen(open)
-    if (!open) {
-      setProjectPendingDeletion(null)
-      setDeleteError(null)
-    }
-  }
-
-  const handleDeleteProject = async () => {
-    if (!projectPendingDeletion || deleting) return
-
-    setDeleting(true)
-    setDeleteError(null)
-
-    const result = await deleteProject(projectPendingDeletion.id)
-
-    setDeleting(false)
-
-    if (!result.success) {
-      setDeleteError(result.error)
-      return
-    }
-
-    const deletedId = projectPendingDeletion.id
-    removeProject(deletedId)
-    closeDeleteDialog(false)
-
-    // Only navigate if the deleted project was the one currently in the URL.
-    if (deletedId === currentProjectId) {
-      const remaining = projects.filter((p) => p.id !== deletedId)
-      if (remaining.length > 0) {
-        router.push(`/dashboard/projects/${remaining[0].id}`)
-      } else {
-        router.push('/dashboard')
-      }
-    }
-  }
-
-  const displayName = activeProject?.name ?? 'No project'
+  // Build the compact switcher list: pinned first, then recent, max 5, no duplicates
+  // Re-computed whenever pinRevision changes (pin/unpin) or projects list changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- pinRevision is the intentional dependency
+  const switcherProjects = sortProjectsForSwitcher(projects, 5)
 
   return (
     <>
@@ -175,51 +236,80 @@ export function Topbar({ onAddTool }: TopbarProps) {
         {/* Divider */}
         <div className="h-5 w-px bg-archai-graphite" />
 
-        {/* Project Selector */}
+        {/* Project Switcher */}
         <DropdownMenu open={projectMenuOpen} onOpenChange={setProjectMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button className="flex items-center gap-2 text-sm text-white hover:text-white/80 transition-colors">
               <FolderOpen className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="max-w-[160px] truncate font-medium">{displayName}</span>
+              <span className="max-w-[160px] truncate font-medium">
+                {activeProject?.name ?? 'No project'}
+              </span>
               <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-56">
-            <DropdownMenuLabel>Projects</DropdownMenuLabel>
+
+          <DropdownMenuContent align="start" className="w-64">
+            <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium pb-1">
+              Projects
+            </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            {projects.length === 0 ? (
-              <div className="px-2 py-1.5 text-xs text-muted-foreground">
+
+            {switcherProjects.length === 0 ? (
+              <div className="px-2 py-2 text-xs text-muted-foreground">
                 No projects yet
               </div>
             ) : (
-              projects.map((project) => (
-                <div key={project.id} className="flex items-center gap-1 rounded-sm px-1">
-                  <button
-                    type="button"
-                    onClick={() => handleSelectProject(project)}
-                    className={cn(
-                      'flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-white outline-none transition-colors hover:bg-archai-graphite focus-visible:bg-archai-graphite',
-                      project.id === currentProjectId && 'text-archai-orange'
-                    )}
-                  >
-                    <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">{project.name}</span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Delete ${project.name}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      openDeleteDialog(project)
-                    }}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-red-900/20 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              ))
+              switcherProjects.map((project) => {
+                const meta = getProjectMeta(project.id)
+                return (
+                  <div key={project.id} className="group flex items-center gap-1 rounded-sm px-1">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectProject(project.id)}
+                      className={cn(
+                        'flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-white outline-none transition-colors hover:bg-archai-graphite focus-visible:bg-archai-graphite',
+                        project.id === currentProjectId && 'text-archai-orange',
+                      )}
+                    >
+                      <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{project.name}</span>
+                      {meta.pinned && (
+                        <Pin className="h-2.5 w-2.5 shrink-0 text-archai-amber/70 ml-auto" />
+                      )}
+                    </button>
+
+                    {/* Pin toggle — visible on hover */}
+                    <button
+                      type="button"
+                      aria-label={meta.pinned ? `Unpin ${project.name}` : `Pin ${project.name}`}
+                      onClick={(e) => handlePin(e, project.id)}
+                      className="opacity-0 group-hover:opacity-100 inline-flex h-7 w-7 items-center justify-center rounded-sm text-muted-foreground hover:text-archai-amber transition-colors focus-visible:opacity-100"
+                    >
+                      {meta.pinned
+                        ? <PinOff className="h-3.5 w-3.5" />
+                        : <Pin className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                )
+              })
             )}
+
             <DropdownMenuSeparator />
+
+            {/* See all projects */}
+            <DropdownMenuItem
+              onClick={() => {
+                setProjectMenuOpen(false)
+                setAllProjectsOpen(true)
+              }}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" />
+              See all projects
+              {projects.length > 5 && (
+                <span className="ml-auto text-[10px] text-muted-foreground">{projects.length}</span>
+              )}
+            </DropdownMenuItem>
+
             <DropdownMenuItem onClick={openNewProjectDialog}>
               <Plus className="h-3.5 w-3.5" />
               New Project
@@ -230,27 +320,67 @@ export function Topbar({ onAddTool }: TopbarProps) {
         {/* Spacer */}
         <div className="flex-1" />
 
-        {/* New Project Button */}
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-xs gap-1.5"
-          onClick={openNewProjectDialog}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          New Project
-        </Button>
+        {/* Contextual action buttons — only shown when inside a project */}
+        {currentProjectId && (
+          <div className="flex items-center gap-2">
+            {/* Sync / Resync — only shown when a project active model exists.
+                Label is "Sync" if never synced, "Resync" if already synced once. */}
+            {activeModelRef && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                onClick={() => void handleResync()}
+                disabled={resyncing}
+                title={`${activeModelRef.syncedAt ? 'Resync' : 'Sync'}: ${activeModelRef.modelName ?? activeModelRef.streamId}`}
+              >
+                {resyncing
+                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                  : <RefreshCw className="h-3 w-3" />}
+                {activeModelRef.syncedAt ? 'Resync' : 'Sync'}
+              </Button>
+            )}
+            {/* Add Model — always shown; opens dialog to link a new model version */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1.5"
+              onClick={() => setSyncModelOpen(true)}
+            >
+              <Plus className="h-3 w-3" />
+              Add Model
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1.5"
+              onClick={() => router.push(`/dashboard/projects/${currentProjectId}/documents`)}
+            >
+              Upload Docs
+            </Button>
+            <Button
+              variant="archai"
+              size="sm"
+              className="h-7 text-xs gap-1.5"
+              onClick={() => router.push(`/dashboard/projects/${currentProjectId}/precheck`)}
+            >
+              Run Precheck
+            </Button>
+          </div>
+        )}
 
-        {/* Add Tool Button */}
-        <Button
-          variant="archai"
-          size="sm"
-          className="h-7 text-xs gap-1.5"
-          onClick={onAddTool}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add Tool
-        </Button>
+        {/* No active project: show New Project button */}
+        {!currentProjectId && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs gap-1.5"
+            onClick={openNewProjectDialog}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New Project
+          </Button>
+        )}
 
         {/* User Avatar + Menu */}
         <DropdownMenu>
@@ -261,7 +391,7 @@ export function Topbar({ onAddTool }: TopbarProps) {
                 <AvatarFallback className="text-[10px]">{userInitials}</AvatarFallback>
               </Avatar>
               <span className="text-xs text-muted-foreground max-w-[120px] truncate hidden sm:block">
-                {user?.email ?? 'Account'}
+                {displayName ?? user?.email ?? 'Account'}
               </span>
               <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
@@ -269,7 +399,10 @@ export function Topbar({ onAddTool }: TopbarProps) {
           <DropdownMenuContent align="end" className="w-48">
             <DropdownMenuLabel className="font-normal">
               <div className="flex flex-col">
-                <span className="text-xs font-medium text-white">{user?.email ?? 'User'}</span>
+                <span className="text-xs font-medium text-white">{displayName ?? user?.email ?? 'User'}</span>
+                {displayName && (
+                  <span className="text-[10px] text-muted-foreground truncate">{user?.email}</span>
+                )}
                 <span className="text-[10px] text-muted-foreground">Pro Plan</span>
               </div>
             </DropdownMenuLabel>
@@ -295,7 +428,7 @@ export function Topbar({ onAddTool }: TopbarProps) {
       </div>
 
       {/* New Project Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      <Dialog open={newProjectDialogOpen} onOpenChange={setNewProjectDialogOpen}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>New Project</DialogTitle>
@@ -319,7 +452,7 @@ export function Topbar({ onAddTool }: TopbarProps) {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setDialogOpen(false)}
+                onClick={() => setNewProjectDialogOpen(false)}
                 disabled={creating}
               >
                 Cancel
@@ -344,50 +477,27 @@ export function Topbar({ onAddTool }: TopbarProps) {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={deleteDialogOpen} onOpenChange={closeDeleteDialog}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Delete Project</DialogTitle>
-            <DialogDescription>
-              This will permanently delete{' '}
-              <span className="font-medium text-white">
-                {projectPendingDeletion?.name ?? 'this project'}
-              </span>
-              .
-            </DialogDescription>
-          </DialogHeader>
-          {deleteError && (
-            <p className="pt-2 text-xs text-red-400">{deleteError}</p>
-          )}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => closeDeleteDialog(false)}
-              disabled={deleting}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              onClick={handleDeleteProject}
-              disabled={!projectPendingDeletion || deleting}
-            >
-              {deleting ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Deleting...
-                </>
-              ) : (
-                'Delete Project'
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Sync Model Dialog — opens in-place from anywhere in the project */}
+      {currentProjectId && (
+        <ProjectModelSyncDialog
+          projectId={currentProjectId}
+          open={syncModelOpen}
+          onOpenChange={setSyncModelOpen}
+          onSynced={() => {
+            // Refresh active model ref so Resync button appears if first model was just synced
+            refreshActiveModelRef(currentProjectId)
+          }}
+        />
+      )}
+
+      {/* All Projects Dialog */}
+      <AllProjectsDialog
+        open={allProjectsOpen}
+        onOpenChange={setAllProjectsOpen}
+        currentProjectId={currentProjectId}
+        onSelectProject={handleSelectProject}
+        onNewProject={openNewProjectDialog}
+      />
     </>
   )
 }

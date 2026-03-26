@@ -70,6 +70,44 @@ export async function createProject(
 }
 
 /**
+ * Rename a project owned by the authenticated user.
+ */
+export async function renameProject(
+  projectId: string,
+  name: string
+): Promise<{ project?: Project; error?: string }> {
+  const trimmed = name.trim()
+  if (!trimmed) return { error: 'Project name is required.' }
+
+  const supabase = await getSupabaseServerClient()
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (!user) return { error: 'Unauthenticated' }
+
+  const { data, error } = await supabase
+    .from('projects')
+    .update({ name: trimmed, updated_at: new Date().toISOString() })
+    .eq('id', projectId)
+    .eq('user_id', user.id)
+    .select('id, name, created_at, updated_at, user_id, speckle_stream_id')
+    .maybeSingle()
+
+  if (error) return { error: error.message }
+  if (!data) return { error: 'Project not found or permission denied.' }
+
+  return {
+    project: {
+      id: data.id,
+      name: data.name,
+      createdAt: data.created_at,
+      updatedAt: data.updated_at,
+      userId: data.user_id,
+      speckleStreamId: data.speckle_stream_id ?? undefined,
+    },
+  }
+}
+
+/**
  * Delete a project owned by the authenticated user.
  */
 export async function deleteProject(projectId: string): Promise<ProjectDeleteResult> {

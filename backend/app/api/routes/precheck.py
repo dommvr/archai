@@ -19,8 +19,30 @@ Next.js integration mapping:
   POST /precheck/runs/{id}/ingest-documents     ← action: "ingest_documents"
   POST /precheck/runs/{id}/extract-rules        ← action: "extract_rules"
   POST /precheck/runs/{id}/sync-speckle-model   ← action: "sync_speckle_model"
+  POST /precheck/runs/{id}/assign-model-ref     ← action: "assign_model_ref"
+  POST /precheck/runs/{id}/assign-site-context  ← action: "assign_site_context"
   POST /precheck/runs/{id}/evaluate             ← action: "evaluate_compliance"
   GET  /projects/{id}/precheck-runs             ← GET /api/agents/precheck?projectId=
+  GET  /projects/{id}/documents                 ← GET /api/agents/precheck?projectId=&scope=documents
+  POST /projects/{id}/documents                 ← action: "register_project_document"
+  GET  /projects/{id}/model-refs                ← GET /api/agents/precheck?projectId=&scope=model_refs
+  POST /projects/{id}/model-refs                ← action: "sync_project_model"
+  GET    /projects/{id}/active-model             ← GET /api/agents/precheck?projectId=&scope=active_model
+  POST   /projects/{id}/active-model             ← action: "set_active_project_model"
+  DELETE /projects/{id}/model-refs/{ref_id}                  ← action: "delete_project_model"
+  GET    /projects/{id}/model-refs/{ref_id}/snapshot         ← GET /api/agents/precheck?projectId=&modelRefId=&scope=model_snapshot
+  GET    /projects/{id}/site-contexts            ← GET /api/agents/precheck?projectId=&scope=site_contexts
+  POST   /projects/{id}/site-contexts            ← action: "create_project_site_context"
+  DELETE /projects/{id}/site-contexts/{ctx_id}  ← action: "delete_project_site_context"
+  GET    /projects/{id}/default-site-context    ← GET /api/agents/precheck?projectId=&scope=default_site_context
+  POST   /projects/{id}/default-site-context    ← action: "set_default_site_context"
+  GET    /projects/{id}/rules                   ← GET /api/agents/precheck?projectId=&scope=rules
+  POST   /projects/{id}/rules                   ← action: "create_manual_rule"
+  GET    /projects/{id}/extraction-options      ← GET /api/agents/precheck?projectId=&scope=extraction_options
+  PUT    /projects/{id}/extraction-options      ← action: "set_extraction_options"
+  POST   /precheck/rules/{rule_id}/approve      ← action: "approve_rule"
+  POST   /precheck/rules/{rule_id}/reject       ← action: "reject_rule"
+  PATCH  /precheck/rules/{rule_id}              ← action: "update_manual_rule"
 """
 
 from __future__ import annotations
@@ -42,18 +64,36 @@ from app.core.dependencies import (
     get_speckle_service,
 )
 from app.core.schemas import (
+    AssignModelRefRequest,
+    AssignSiteContextRequest,
     AsyncActionResponse,
+    CreateManualRuleRequest,
     CreatePrecheckRunRequest,
+    CreateProjectSiteContextRequest,
+    ExtractedRule,
+    GeometrySnapshot,
     GetRunDetailsResponse,
     IngestDocumentsRequest,
     IngestSiteRequest,
     OkResponse,
     PrecheckRun,
     PrecheckRunStatus,
+    ProjectDocumentsResponse,
+    ProjectExtractionOptions,
+    ProjectModelRefsResponse,
     ProjectRunsResponse,
+    ProjectSiteContextsResponse,
     RegisterDocumentRequest,
+    RegisterProjectDocumentRequest,
     ScoreContext,
+    SetActiveProjectModelRequest,
+    SetDefaultSiteContextRequest,
+    SetProjectExtractionOptionsRequest,
+    SiteContext,
+    SpeckleModelRef,
+    SyncProjectModelRequest,
     SyncSpeckleModelRequest,
+    UpdateManualRuleRequest,
     UploadedDocument,
 )
 from app.repositories.precheck_repository import PrecheckRepository
@@ -207,8 +247,32 @@ async def ingest_documents(
     async def _task() -> None:
         try:
             docs = await repo.get_documents_by_ids(body.document_ids)
+
+            # 1. Stamp run_id on any docs that are currently project-scoped (run_id IS NULL).
+            #    This is the critical step that makes get_documents_for_run() return these
+            #    docs so extract_rules_from_chunks() can find them.
+            await repo.associate_documents_to_run(run_id, body.document_ids)
+
+            # 2. Chunk documents that do not yet have chunks (idempotency: skip re-chunking).
+            #    Existing project-library docs selected from the UI may already be chunked
+            #    from a prior ingestion — reusing their chunks avoids duplicate rows and
+            #    redundant storage downloads.
+            newly_ingested = 0
             for doc in docs:
-                await svc.process_document(doc)
+                existing_chunks = await repo.get_chunks_for_document(doc.id)
+                if existing_chunks:
+                    log.info(
+                        "Skipping re-chunk for doc=%s (%s) — %d chunks already exist",
+                        doc.id, doc.file_name, len(existing_chunks),
+                    )
+                else:
+                    await svc.process_document(doc)
+                    newly_ingested += 1
+
+            log.info(
+                "ingest_documents: run=%s, %d docs associated, %d newly chunked, %d reused",
+                run_id, len(docs), newly_ingested, len(docs) - newly_ingested,
+            )
             await pub.publish_run_status(run_id, PrecheckRunStatus.CREATED, "Documents processed")
         except Exception as exc:
             log.exception("Document ingestion failed for run=%s", run_id)
@@ -330,8 +394,17 @@ async def sync_speckle_model(
             # a new one. Prevents orphaned snapshots when the user re-syncs a model.
             await repo.delete_snapshots_for_run(run_id)
 
-            model_ref = await svc.create_speckle_model_ref(run.project_id, body)
-            await repo.update_run_speckle_ref(run_id, model_ref.id)
+            # Dedup: reuse existing project-level model ref if this stream+version
+            # is already registered, so we never create duplicate rows.
+            existing_ref = await repo.get_model_ref_by_stream_version(
+                run.project_id, body.stream_id, body.version_id
+            )
+            if existing_ref:
+                model_ref = existing_ref
+                await repo.update_run_speckle_ref(run_id, model_ref.id)
+            else:
+                model_ref = await svc.create_speckle_model_ref(run.project_id, body)
+                await repo.update_run_speckle_ref(run_id, model_ref.id)
 
             await pub.publish_run_status(
                 run_id, PrecheckRunStatus.COMPUTING_METRICS, "Deriving geometry metrics"
@@ -359,6 +432,116 @@ async def sync_speckle_model(
         status=PrecheckRunStatus.SYNCING_MODEL,
         message="Speckle model sync started in background",
     )
+
+
+# ════════════════════════════════════════════════════════════
+# POST /precheck/runs/{run_id}/assign-model-ref
+# Link an existing project SpeckleModelRef to this run (no new row created).
+# ════════════════════════════════════════════════════════════
+
+@router.post("/runs/{run_id}/assign-model-ref", response_model=OkResponse)
+async def assign_model_ref(
+    run_id:  UUID,
+    body:    AssignModelRefRequest,
+    user:    AuthenticatedUser  = Depends(get_current_user),
+    repo:    PrecheckRepository = Depends(get_repository),
+    pub:     RealtimePublisher  = Depends(get_realtime_publisher),
+) -> OkResponse:
+    """
+    Links an existing SpeckleModelRef (already synced to the project) to a run.
+    Unlike sync-speckle-model, this does NOT create a new speckle_model_refs row.
+    Also copies the project-level geometry snapshot (run_id=NULL) to a run-scoped
+    snapshot so Tool 1 can display metrics immediately without a re-sync.
+    Advances the run status to SYNCED so the frontend progress card reflects the
+    model being ready — the run was previously stuck at "created".
+    Maps to: lib/precheck/api.ts → assignModelRefToRun()
+             Next.js seam: action "assign_model_ref"
+    """
+    run = await _require_run(repo, run_id)
+
+    # Verify the model ref exists and belongs to the same project as the run
+    model_ref = await repo.get_model_ref(body.model_ref_id)
+    if not model_ref:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model ref {body.model_ref_id} not found",
+        )
+    if model_ref.project_id != run.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Model ref does not belong to this run's project",
+        )
+
+    await repo.update_run_speckle_ref(run_id, body.model_ref_id)
+    log.info(
+        "Assigned existing model ref=%s to run=%s (no new row created)",
+        body.model_ref_id, run_id,
+    )
+
+    # Copy the project-level snapshot (run_id=NULL) to a run-scoped snapshot
+    # so Tool 1 can show metrics immediately without re-deriving geometry.
+    await repo.copy_model_snapshot_to_run(body.model_ref_id, run_id)
+
+    # Advance run to SYNCED so the progress card shows the model step as complete.
+    # Only advance if the run is still in an early state (created / syncing_model);
+    # do not regress a run that has already progressed further.
+    early_statuses = {
+        PrecheckRunStatus.CREATED,
+        PrecheckRunStatus.SYNCING_MODEL,
+        PrecheckRunStatus.COMPUTING_METRICS,
+    }
+    if run.status in early_statuses:
+        await pub.publish_run_status(run_id, PrecheckRunStatus.SYNCED, "Model assigned")
+
+    return OkResponse()
+
+
+# ════════════════════════════════════════════════════════════
+# POST /precheck/runs/{run_id}/assign-site-context
+# Link an existing project SiteContext to this run (no new row created).
+# ════════════════════════════════════════════════════════════
+
+@router.post("/runs/{run_id}/assign-site-context", response_model=OkResponse)
+async def assign_site_context(
+    run_id:  UUID,
+    body:    AssignSiteContextRequest,
+    user:    AuthenticatedUser  = Depends(get_current_user),
+    repo:    PrecheckRepository = Depends(get_repository),
+    pub:     RealtimePublisher  = Depends(get_realtime_publisher),
+) -> OkResponse:
+    """
+    Links an existing SiteContext (already created for the project) to a run.
+    Unlike ingest-site, this does NOT create a new site_contexts row.
+    Preserves existing run status — site context assignment is non-destructive.
+    Maps to: lib/precheck/api.ts → assignSiteContextToRun()
+             Next.js seam: action "assign_site_context"
+    """
+    run = await _require_run(repo, run_id)
+
+    # Verify the site context exists and belongs to the same project as the run
+    site_context = await repo.get_site_context(body.site_context_id)
+    if not site_context:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Site context {body.site_context_id} not found",
+        )
+    if site_context.project_id != run.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Site context does not belong to this run's project",
+        )
+
+    await repo.update_run_site_context(run_id, body.site_context_id)
+    log.info(
+        "Assigned existing site context=%s to run=%s (no new row created)",
+        body.site_context_id, run_id,
+    )
+
+    # Preserve run status — site context is a metadata update, not a pipeline step.
+    # Do not advance or regress the run state; just publish to keep realtime in sync.
+    await pub.publish_run_status(run_id, run.status, "Site context assigned")
+
+    return OkResponse()
 
 
 # ════════════════════════════════════════════════════════════
@@ -407,8 +590,11 @@ async def evaluate_compliance(
             )
             snapshot = await repo.get_latest_geometry_snapshot(run_id)
 
+            # ── Fetch project extraction options ───────────────
+            options = await repo.get_extraction_options(run.project_id)
+
             # ── Select applicable rules ────────────────────────
-            rules = await engine.select_applicable_rules(run_id, site_context)
+            rules = await engine.select_applicable_rules(run_id, site_context, options)
 
             # ── Build metric map ───────────────────────────────
             metric_map = {}
@@ -423,7 +609,10 @@ async def evaluate_compliance(
             issues = await engine.generate_issues(run_id, checks, rules_by_id)
 
             # ── Score context ──────────────────────────────────
-            has_reviewed = any(r.status.value == "reviewed" for r in rules)
+            # A rule counts as "reviewed" if it has been explicitly approved or
+            # auto-approved (or the legacy 'reviewed' status from V1).
+            _AUTHORITATIVE_STATUSES = {"reviewed", "approved", "auto_approved"}
+            has_reviewed = any(r.status.value in _AUTHORITATIVE_STATUSES for r in rules)
             score_ctx = ScoreContext(
                 has_parcel_data=bool(site_context and site_context.parcel_area_m2),
                 has_zoning_data=bool(site_context and site_context.zoning_district),
@@ -549,6 +738,7 @@ async def delete_run(
 
 project_router = APIRouter(prefix="/projects", tags=["precheck"])
 
+
 @project_router.get("/{project_id}/precheck-runs", response_model=ProjectRunsResponse)
 async def list_project_runs(
     project_id: UUID,
@@ -560,6 +750,678 @@ async def list_project_runs(
     """
     runs = await repo.list_runs_for_project(project_id)
     return ProjectRunsResponse(runs=runs, total=len(runs))
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/documents
+# List all documents for a project (not filtered by run).
+# ════════════════════════════════════════════════════════════
+
+@project_router.get("/{project_id}/documents", response_model=ProjectDocumentsResponse)
+async def list_project_documents(
+    project_id: UUID,
+    user:       AuthenticatedUser  = Depends(get_current_user),
+    repo:       PrecheckRepository = Depends(get_repository),
+) -> ProjectDocumentsResponse:
+    """
+    Returns all uploaded_documents rows for a project regardless of run_id.
+    Maps to: lib/precheck/api.ts → listProjectDocuments()
+             Next.js seam: GET /api/agents/precheck?projectId=&scope=documents
+    """
+    docs = await repo.get_documents_for_project(project_id)
+    return ProjectDocumentsResponse(documents=docs, total=len(docs))
+
+
+# ════════════════════════════════════════════════════════════
+# POST /projects/{project_id}/documents
+# Register a document directly against the project (no run).
+# ════════════════════════════════════════════════════════════
+
+@project_router.post(
+    "/{project_id}/documents",
+    response_model=UploadedDocument,
+    status_code=status.HTTP_201_CREATED,
+)
+async def register_project_document(
+    project_id: UUID,
+    body:       RegisterProjectDocumentRequest,
+    user:       AuthenticatedUser       = Depends(get_current_user),
+    svc:        DocumentIngestionService = Depends(get_document_ingestion),
+) -> UploadedDocument:
+    """
+    Registers a document already uploaded to Supabase Storage at the project level.
+    run_id is NULL — the document belongs to the project, not any specific run.
+    Maps to: lib/precheck/api.ts → registerProjectDocument()
+             Next.js seam: action "register_project_document"
+    """
+    doc = await svc.create_uploaded_document(
+        project_id=project_id,
+        run_id=None,
+        file_name=body.file_name,
+        mime_type=body.mime_type,
+        document_type=body.document_type.value,
+        storage_path=body.storage_path,
+    )
+    log.info(
+        "Registered project document: id=%s name=%r for project=%s",
+        doc.id, doc.file_name, project_id,
+    )
+    return doc
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/model-refs
+# List all Speckle model refs for a project.
+# ════════════════════════════════════════════════════════════
+
+@project_router.get("/{project_id}/model-refs", response_model=ProjectModelRefsResponse)
+async def list_project_model_refs(
+    project_id: UUID,
+    user:       AuthenticatedUser  = Depends(get_current_user),
+    repo:       PrecheckRepository = Depends(get_repository),
+) -> ProjectModelRefsResponse:
+    """
+    Returns all speckle_model_refs rows for a project, newest first.
+    Maps to: lib/precheck/api.ts → listProjectModelRefs()
+             Next.js seam: GET /api/agents/precheck?projectId=&scope=model_refs
+    """
+    refs = await repo.list_model_refs_for_project(project_id)
+    return ProjectModelRefsResponse(model_refs=refs, total=len(refs))
+
+
+# ════════════════════════════════════════════════════════════
+# POST /projects/{project_id}/model-refs
+# Sync a Speckle model version to a project (no run required).
+# ════════════════════════════════════════════════════════════
+
+@project_router.post(
+    "/{project_id}/model-refs",
+    response_model=SpeckleModelRef,
+    status_code=status.HTTP_201_CREATED,
+)
+async def sync_project_model(
+    project_id:      UUID,
+    body:            SyncProjectModelRequest,
+    background:      BackgroundTasks,
+    user:            AuthenticatedUser  = Depends(get_current_user),
+    repo:            PrecheckRepository = Depends(get_repository),
+    svc:             SpeckleService     = Depends(get_speckle_service),
+) -> SpeckleModelRef:
+    """
+    Creates a SpeckleModelRef belonging to the project without creating a run.
+    Deduplicates by (project_id, stream_id, version_id) — returns existing ref if
+    the same version was already synced. Always re-triggers geometry snapshot derivation
+    so that metrics are kept fresh.
+    Maps to: lib/precheck/api.ts → syncProjectModel()
+             Next.js seam: action "sync_project_model"
+    """
+    # Dedup: if this stream+version is already registered for the project, reuse it.
+    existing = await repo.get_model_ref_by_stream_version(
+        project_id, body.stream_id, body.version_id
+    )
+    if existing:
+        log.info(
+            "Reusing existing project model ref: id=%s stream=%r version=%r for project=%s",
+            existing.id, existing.stream_id, existing.version_id, project_id,
+        )
+        ref = existing
+    else:
+        run_scoped_body = SyncSpeckleModelRequest(
+            stream_id=body.stream_id,
+            version_id=body.version_id,
+            branch_name=body.branch_name,
+            model_name=body.model_name,
+        )
+        ref = await svc.create_speckle_model_ref(project_id, run_scoped_body)
+        log.info(
+            "Synced project model ref: id=%s stream=%r version=%r for project=%s",
+            ref.id, ref.stream_id, ref.version_id, project_id,
+        )
+    # Always re-derive geometry metrics in background so the client is not blocked.
+    background.add_task(
+        svc.derive_geometry_snapshot_for_model,
+        project_id,
+        ref,
+        None,  # site_context — not available at project-model level
+    )
+    return ref
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/model-refs/{model_ref_id}/snapshot
+# Return the latest project-level geometry snapshot for a model ref.
+# ════════════════════════════════════════════════════════════
+
+@project_router.get(
+    "/{project_id}/model-refs/{model_ref_id}/snapshot",
+    response_model=GeometrySnapshot | None,
+)
+async def get_model_ref_snapshot(
+    project_id:    UUID,
+    model_ref_id:  UUID,
+    user:          AuthenticatedUser  = Depends(get_current_user),
+    repo:          PrecheckRepository = Depends(get_repository),
+) -> GeometrySnapshot | None:
+    """
+    Returns the most recent project-level geometry snapshot for a model ref.
+    Returns null if metrics haven't been derived yet (background task still running).
+    Maps to: lib/precheck/api.ts → getModelRefSnapshot()
+             Next.js seam: GET /api/agents/precheck?projectId=&modelRefId=&scope=model_snapshot
+    """
+    return await repo.get_snapshot_for_model_ref(model_ref_id)
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/active-model
+# Return the active SpeckleModelRef for a project (or 204 if none).
+# ════════════════════════════════════════════════════════════
+
+@project_router.get(
+    "/{project_id}/active-model",
+    response_model=SpeckleModelRef | None,
+)
+async def get_active_project_model(
+    project_id: UUID,
+    user:       AuthenticatedUser  = Depends(get_current_user),
+    repo:       PrecheckRepository = Depends(get_repository),
+) -> SpeckleModelRef | None:
+    """
+    Returns the active SpeckleModelRef for the project, or null if none is set.
+    Maps to: lib/precheck/api.ts → getProjectActiveModelRef()
+             Next.js seam: GET /api/agents/precheck?projectId=&scope=active_model
+    """
+    return await repo.get_active_model_ref_for_project(project_id)
+
+
+# ════════════════════════════════════════════════════════════
+# POST /projects/{project_id}/active-model
+# Designate one SpeckleModelRef as the project's active model.
+# ════════════════════════════════════════════════════════════
+
+@project_router.post(
+    "/{project_id}/active-model",
+    response_model=OkResponse,
+)
+async def set_active_project_model(
+    project_id: UUID,
+    body: SetActiveProjectModelRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repo: PrecheckRepository = Depends(get_repository),
+) -> OkResponse:
+    """
+    Persists the active SpeckleModelRef for a project.
+    The active ref pre-fills SpeckleModelPicker on new precheck runs.
+    Maps to: lib/precheck/api.ts → setActiveProjectModel()
+             Next.js seam: action "set_active_project_model"
+    """
+    await repo.set_active_model_ref(project_id, body.model_ref_id)
+    log.info(
+        "Set active model ref=%s for project=%s",
+        body.model_ref_id, project_id,
+    )
+    return OkResponse()
+
+
+# ════════════════════════════════════════════════════════════
+# DELETE /projects/{project_id}/model-refs/{model_ref_id}
+# Remove a Speckle model ref from a project.
+# If it was the active model, clears that pointer first.
+# ════════════════════════════════════════════════════════════
+
+@project_router.delete(
+    "/{project_id}/model-refs/{model_ref_id}",
+    response_model=OkResponse,
+)
+async def delete_project_model(
+    project_id:    UUID,
+    model_ref_id:  UUID,
+    user:          AuthenticatedUser  = Depends(get_current_user),
+    repo:          PrecheckRepository = Depends(get_repository),
+) -> OkResponse:
+    """
+    Deletes a SpeckleModelRef belonging to the project.
+
+    Deletion strategy: cleanup delete.
+      1. Verify the ref exists and belongs to this project.
+      2. Handle active-model pointer:
+         - If this was the active model, attempt to promote another model to active.
+         - If no other model exists, clear active_model_ref_id to NULL.
+      3. Delete all geometry_snapshots that reference this model ref
+         (both project-level run_id=NULL and run-scoped).
+         geometry_snapshots.speckle_model_ref_id has ON DELETE RESTRICT so
+         they must be removed before the model ref can be deleted.
+         Snapshots are derived data and are safe to hard-delete.
+      4. Delete the speckle_model_refs row.
+
+    precheck_runs.speckle_model_ref_id is handled automatically by the DB
+    via ON DELETE SET NULL — affected runs are preserved but lose their model
+    ref pointer.
+
+    Maps to: lib/precheck/api.ts → deleteProjectModel()
+             Next.js seam: action "delete_project_model"
+    """
+    ref = await repo.get_model_ref(model_ref_id)
+    if not ref:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model ref {model_ref_id} not found",
+        )
+    if ref.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Model ref does not belong to this project",
+        )
+
+    # Step 1 — Handle active model pointer before deletion
+    active_ref = await repo.get_active_model_ref_for_project(project_id)
+    if active_ref and active_ref.id == model_ref_id:
+        # Try to promote the next most-recently-synced model as active
+        all_refs = await repo.list_model_refs_for_project(project_id)
+        fallback = next((r for r in all_refs if r.id != model_ref_id), None)
+        if fallback:
+            await repo.set_active_model_ref(project_id, fallback.id)
+            log.info(
+                "Active model ref=%s deleted for project=%s — promoted fallback ref=%s",
+                model_ref_id, project_id, fallback.id,
+            )
+        else:
+            await repo.clear_active_model_ref_if_matches(project_id, model_ref_id)
+            log.info(
+                "Active model ref=%s deleted for project=%s — no fallback, cleared active",
+                model_ref_id, project_id,
+            )
+
+    # Step 2 — Remove all geometry snapshots (run-scoped + project-level)
+    #          so the ON DELETE RESTRICT FK on geometry_snapshots is satisfied.
+    await repo.delete_all_snapshots_for_model_ref(model_ref_id)
+
+    # Step 3 — Delete the model ref itself
+    await repo.delete_model_ref(model_ref_id)
+    log.info("Deleted model ref=%s from project=%s", model_ref_id, project_id)
+    return OkResponse()
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/site-contexts
+# List all site contexts for a project.
+# ════════════════════════════════════════════════════════════
+
+@project_router.get(
+    "/{project_id}/site-contexts",
+    response_model=ProjectSiteContextsResponse,
+)
+async def list_project_site_contexts(
+    project_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repo: PrecheckRepository = Depends(get_repository),
+) -> ProjectSiteContextsResponse:
+    """
+    Returns all site_contexts rows for a project, newest first.
+    Also includes the project's default_site_context_id so the
+    client can highlight the default.
+    Maps to: lib/precheck/api.ts → listProjectSiteContexts()
+             Next.js seam: GET /api/agents/precheck?projectId=&scope=site_contexts
+    """
+    contexts = await repo.get_site_contexts_for_project(project_id)
+    default_id = await repo.get_default_site_context_id_for_project(
+        project_id
+    )
+    return ProjectSiteContextsResponse(
+        site_contexts=contexts,
+        total=len(contexts),
+        default_site_context_id=default_id,
+    )
+
+
+# ════════════════════════════════════════════════════════════
+# POST /projects/{project_id}/site-contexts
+# Create a standalone site context (no run required).
+# ════════════════════════════════════════════════════════════
+
+@project_router.post(
+    "/{project_id}/site-contexts",
+    response_model=SiteContext,
+)
+async def create_project_site_context(
+    project_id: UUID,
+    body: CreateProjectSiteContextRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repo: PrecheckRepository = Depends(get_repository),
+    svc: SiteDataProviderService = Depends(get_site_data_provider),
+) -> SiteContext:
+    """
+    Creates a new SiteContext for a project without requiring a run.
+    Optionally sets the new context as the project default (body.set_as_default).
+    Maps to: lib/precheck/api.ts → createProjectSiteContext()
+             Next.js seam: action "create_project_site_context"
+    """
+    # Reuse the same site-data normalization pipeline used by ingest-site,
+    # but pass run_id=None so no run status is touched.
+    from app.core.schemas import IngestSiteRequest as _IngestSiteRequest
+    ingest_body = _IngestSiteRequest(
+        address=body.address,
+        manual_overrides=body.manual_overrides,
+    )
+    site_context = await svc.normalize_site_context(
+        run_id=None,
+        project_id=project_id,
+        request=ingest_body,
+    )
+    if body.set_as_default:
+        await repo.set_default_site_context(project_id, site_context.id)
+        log.info(
+            "Set new site context=%s as default for project=%s",
+            site_context.id, project_id,
+        )
+    log.info(
+        "Created project site context=%s for project=%s",
+        site_context.id, project_id,
+    )
+    return site_context
+
+
+# ════════════════════════════════════════════════════════════
+# DELETE /projects/{project_id}/site-contexts/{site_context_id}
+# Hard-delete a site context from a project.
+# ════════════════════════════════════════════════════════════
+
+@project_router.delete(
+    "/{project_id}/site-contexts/{site_context_id}",
+    response_model=OkResponse,
+)
+async def delete_project_site_context(
+    project_id: UUID,
+    site_context_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repo: PrecheckRepository = Depends(get_repository),
+) -> OkResponse:
+    """
+    Hard-deletes a SiteContext row for a project.
+
+    Foreign key constraints (ON DELETE SET NULL) automatically clear:
+      - precheck_runs.site_context_id for any run using this context
+      - projects.default_site_context_id if this was the project default
+
+    Maps to: lib/precheck/api.ts → deleteProjectSiteContext()
+             Next.js seam: action "delete_project_site_context"
+    """
+    ctx = await repo.get_site_context(site_context_id)
+    if not ctx:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Site context {site_context_id} not found",
+        )
+    if ctx.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Site context does not belong to this project",
+        )
+    await repo.delete_site_context(site_context_id)
+    log.info(
+        "Deleted site context=%s from project=%s", site_context_id, project_id
+    )
+    return OkResponse()
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/default-site-context
+# Return the default SiteContext for a project (or null if none).
+# ════════════════════════════════════════════════════════════
+
+@project_router.get(
+    "/{project_id}/default-site-context",
+    response_model=SiteContext | None,
+)
+async def get_default_project_site_context(
+    project_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repo: PrecheckRepository = Depends(get_repository),
+) -> SiteContext | None:
+    """
+    Returns the default SiteContext for the project, or null if none.
+    Maps to: lib/precheck/api.ts → getProjectDefaultSiteContext()
+             Next.js seam: GET /api/agents/precheck?projectId=&scope=default_site_context
+    """
+    return await repo.get_default_site_context_for_project(project_id)
+
+
+# ════════════════════════════════════════════════════════════
+# POST /projects/{project_id}/default-site-context
+# Designate one SiteContext as the project's default.
+# ════════════════════════════════════════════════════════════
+
+@project_router.post(
+    "/{project_id}/default-site-context",
+    response_model=OkResponse,
+)
+async def set_default_project_site_context(
+    project_id: UUID,
+    body: SetDefaultSiteContextRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repo: PrecheckRepository = Depends(get_repository),
+) -> OkResponse:
+    """
+    Persists the default SiteContext for a project.
+    The default context pre-fills SiteContextForm on new precheck runs.
+    Maps to: lib/precheck/api.ts → setProjectDefaultSiteContext()
+             Next.js seam: action "set_default_site_context"
+    """
+    # Verify the site context belongs to this project
+    ctx = await repo.get_site_context(body.site_context_id)
+    if not ctx:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Site context {body.site_context_id} not found",
+        )
+    if ctx.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Site context does not belong to this project",
+        )
+    await repo.set_default_site_context(project_id, body.site_context_id)
+    log.info(
+        "Set default site context=%s for project=%s",
+        body.site_context_id, project_id,
+    )
+    return OkResponse()
+
+
+# ════════════════════════════════════════════════════════════
+# POST /precheck/rules/{rule_id}/approve
+# Mark an extracted rule as approved (authoritative).
+# ════════════════════════════════════════════════════════════
+
+@router.post("/rules/{rule_id}/approve", response_model=ExtractedRule)
+async def approve_rule(
+    rule_id: UUID,
+    user:    AuthenticatedUser    = Depends(get_current_user),
+    svc:     RuleExtractionService = Depends(get_rule_extraction),
+) -> ExtractedRule:
+    """
+    Sets the rule status to 'approved' and is_authoritative=True.
+    Clears the is_recommended flag on competing rules in the same conflict group.
+    Maps to: lib/precheck/api.ts → approveRule()
+             Next.js seam: action "approve_rule"
+    """
+    try:
+        rule = await svc.approve_rule(rule_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    log.info("Rule %s approved by user=%s", rule_id, user.user_id)
+    return rule
+
+
+# ════════════════════════════════════════════════════════════
+# POST /precheck/rules/{rule_id}/reject
+# Mark an extracted rule as rejected (excluded from compliance).
+# ════════════════════════════════════════════════════════════
+
+@router.post("/rules/{rule_id}/reject", response_model=ExtractedRule)
+async def reject_rule(
+    rule_id: UUID,
+    user:    AuthenticatedUser    = Depends(get_current_user),
+    svc:     RuleExtractionService = Depends(get_rule_extraction),
+) -> ExtractedRule:
+    """
+    Sets the rule status to 'rejected' and is_authoritative=False.
+    Maps to: lib/precheck/api.ts → rejectRule()
+             Next.js seam: action "reject_rule"
+    """
+    try:
+        rule = await svc.reject_rule(rule_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    log.info("Rule %s rejected by user=%s", rule_id, user.user_id)
+    return rule
+
+
+# ════════════════════════════════════════════════════════════
+# PATCH /precheck/rules/{rule_id}
+# Update fields of a manual rule (source_kind='manual' only).
+# ════════════════════════════════════════════════════════════
+
+@router.patch("/rules/{rule_id}", response_model=ExtractedRule)
+async def update_manual_rule(
+    rule_id: UUID,
+    body:    UpdateManualRuleRequest,
+    user:    AuthenticatedUser    = Depends(get_current_user),
+    svc:     RuleExtractionService = Depends(get_rule_extraction),
+) -> ExtractedRule:
+    """
+    Updates a manual rule's editable fields.
+    Raises 403 if the rule was AI-extracted (source_kind='extracted').
+    Maps to: lib/precheck/api.ts → updateManualRule()
+             Next.js seam: action "update_manual_rule"
+    """
+    updates = body.model_dump(exclude_none=True)
+    try:
+        rule = await svc.update_manual_rule(rule_id, updates)
+    except ValueError as exc:
+        msg = str(exc)
+        code = status.HTTP_403_FORBIDDEN if "not a manual rule" in msg else status.HTTP_404_NOT_FOUND
+        raise HTTPException(code, detail=msg) from exc
+    log.info("Manual rule %s updated by user=%s", rule_id, user.user_id)
+    return rule
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/rules
+# List all rules for a project (all runs combined).
+# ════════════════════════════════════════════════════════════
+
+@project_router.get("/{project_id}/rules", response_model=list[ExtractedRule])
+async def list_project_rules(
+    project_id: UUID,
+    user:       AuthenticatedUser  = Depends(get_current_user),
+    repo:       PrecheckRepository = Depends(get_repository),
+) -> list[ExtractedRule]:
+    """
+    Returns all extracted_rules for a project (across all runs + manual rules).
+    Used by the rule management panel in the UI.
+    Maps to: lib/precheck/api.ts → listProjectRules()
+             Next.js seam: GET /api/agents/precheck?projectId=&scope=rules
+    """
+    return await repo.get_rules_for_project(project_id)
+
+
+# ════════════════════════════════════════════════════════════
+# POST /projects/{project_id}/rules
+# Create a manual rule directly against a project.
+# ════════════════════════════════════════════════════════════
+
+@project_router.post(
+    "/{project_id}/rules",
+    response_model=ExtractedRule,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_manual_rule(
+    project_id: UUID,
+    body:       CreateManualRuleRequest,
+    user:       AuthenticatedUser    = Depends(get_current_user),
+    svc:        RuleExtractionService = Depends(get_rule_extraction),
+) -> ExtractedRule:
+    """
+    Creates a manual rule scoped to the project.
+    Manual rules are authoritative by default (no extraction review required).
+    Maps to: lib/precheck/api.ts → createManualRule()
+             Next.js seam: action "create_manual_rule"
+    """
+    rule = await svc.create_manual_rule(
+        project_id=project_id,
+        metric_key=body.metric_key,
+        operator=body.operator,
+        title=body.title,
+        value_number=body.value_number,
+        value_min=body.value_min,
+        value_max=body.value_max,
+        units=body.units,
+        condition_text=body.condition_text,
+        exception_text=body.exception_text,
+        applicability=body.applicability,
+    )
+    log.info(
+        "Manual rule created: id=%s metric=%s for project=%s by user=%s",
+        rule.id, rule.metric_key.value, project_id, user.user_id,
+    )
+    return rule
+
+
+# ════════════════════════════════════════════════════════════
+# GET /projects/{project_id}/extraction-options
+# Fetch project rule extraction options.
+# ════════════════════════════════════════════════════════════
+
+@project_router.get(
+    "/{project_id}/extraction-options",
+    response_model=ProjectExtractionOptions,
+)
+async def get_extraction_options(
+    project_id: UUID,
+    user:       AuthenticatedUser  = Depends(get_current_user),
+    repo:       PrecheckRepository = Depends(get_repository),
+) -> ProjectExtractionOptions:
+    """
+    Returns the project's rule extraction options, or defaults if not yet set.
+    Maps to: lib/precheck/api.ts → getProjectExtractionOptions()
+             Next.js seam: GET /api/agents/precheck?projectId=&scope=extraction_options
+    """
+    opts = await repo.get_extraction_options(project_id)
+    if opts is None:
+        # Return defaults — no DB row required until the user changes something
+        opts = ProjectExtractionOptions(
+            project_id=project_id,
+            rule_auto_apply_enabled=False,
+            rule_auto_apply_confidence_threshold=0.82,
+            manual_verification_required=True,
+            auto_resolve_conflicts=False,
+        )
+    return opts
+
+
+# ════════════════════════════════════════════════════════════
+# PUT /projects/{project_id}/extraction-options
+# Upsert project rule extraction options.
+# ════════════════════════════════════════════════════════════
+
+@project_router.put(
+    "/{project_id}/extraction-options",
+    response_model=ProjectExtractionOptions,
+)
+async def set_extraction_options(
+    project_id: UUID,
+    body:       SetProjectExtractionOptionsRequest,
+    user:       AuthenticatedUser  = Depends(get_current_user),
+    repo:       PrecheckRepository = Depends(get_repository),
+) -> ProjectExtractionOptions:
+    """
+    Creates or updates rule extraction options for the project.
+    Maps to: lib/precheck/api.ts → setProjectExtractionOptions()
+             Next.js seam: action "set_extraction_options"
+    """
+    patch = body.model_dump(exclude_none=True)
+    opts = await repo.upsert_extraction_options(project_id, patch)
+    log.info("Extraction options updated for project=%s by user=%s", project_id, user.user_id)
+    return opts
 
 
 # ── Internal helpers ──────────────────────────────────────────

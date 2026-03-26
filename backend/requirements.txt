@@ -35,7 +35,7 @@ pytest-asyncio>=0.24.0
 specklepy>=2.23.0               # Speckle Python SDK — object fetch via ServerTransport
 
 # ── Future integrations (comment in when ready) ───────────────
-# openai>=1.50.0                # LLM rule extraction + embeddings
+openai>=1.83.0                  # LLM rule extraction + embeddings (Responses API requires >=1.83.0)
 # langchain>=0.3.0              # LangGraph agent orchestration
 # langgraph>=0.2.0
 # tiktoken>=0.8.0               # token counting for chunking

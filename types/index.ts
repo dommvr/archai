@@ -15,12 +15,24 @@ export type ToolId =
   | 'spec-writer'
   | 'export-sync'
 
+/** Sections in the project-centric left navigation rail. */
+export type ProjectSectionId =
+  | 'overview'
+  | 'viewer'
+  | 'models'
+  | 'documents'
+  | 'runs'
+  | 'tools'
+  | 'settings'
+
 export interface NavItem {
-  id: ToolId
+  id: ToolId | ProjectSectionId
   label: string
   icon: string
   href: string
   badge?: string
+  /** When set, this item is rendered inside the Tools collapsible group. */
+  isTool?: boolean
 }
 
 export interface Project {
@@ -30,6 +42,14 @@ export interface Project {
   updatedAt: string
   userId: string
   speckleStreamId?: string
+  /** ISO timestamp of the last time the user navigated to this project. Client-persisted via localStorage. */
+  lastOpenedAt?: string
+  /** Whether the user has pinned this project to the top of the switcher. Client-persisted via localStorage. */
+  pinned?: boolean
+  /** ISO timestamp when the project was pinned. Used to order pinned projects. Client-persisted via localStorage. */
+  pinnedAt?: string
+  /** The Speckle model ref ID currently marked as the project's active model. */
+  activeModelRefId?: string | null
 }
 
 export type ProjectDeleteResult =

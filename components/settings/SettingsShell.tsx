@@ -37,7 +37,14 @@ interface SettingsShellProps {
 
 export function SettingsShell({ user, children }: SettingsShellProps) {
   const pathname = usePathname()
-  const userInitials = user.email ? user.email.slice(0, 2).toUpperCase() : 'U'
+  const settingsDisplayName =
+    (user.user_metadata?.full_name as string | undefined) ??
+    (user.user_metadata?.name as string | undefined) ??
+    null
+
+  const userInitials = settingsDisplayName
+    ? settingsDisplayName.trim().split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase()
+    : (user.email ? user.email.slice(0, 2).toUpperCase() : 'U')
 
   return (
     <div className="min-h-screen bg-archai-black text-white flex flex-col">
@@ -98,7 +105,10 @@ export function SettingsShell({ user, children }: SettingsShellProps) {
                 <span className="text-[9px] font-bold text-archai-orange">{userInitials}</span>
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-white truncate">{user.email ?? 'User'}</p>
+                <p className="text-xs font-medium text-white truncate">{settingsDisplayName ?? user.email ?? 'User'}</p>
+                {settingsDisplayName && (
+                  <p className="text-[10px] text-muted-foreground truncate">{user.email}</p>
+                )}
                 <p className="text-[10px] text-muted-foreground">Pro Plan</p>
               </div>
             </div>

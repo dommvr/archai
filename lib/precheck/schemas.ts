@@ -5,6 +5,7 @@ import {
   ISSUE_SEVERITIES,
   METRIC_KEYS,
   PRECHECK_RUN_STATUSES,
+  RULE_SOURCE_KINDS,
   RULE_STATUSES,
 } from "./constants"
 
@@ -81,10 +82,13 @@ export const DocumentChunkSchema = z.object({
 
 // Nullable columns: description, value_number, value_min, value_max,
 // units, extraction_notes — all text/numeric without NOT NULL.
+// V2 adds: sourceKind, isAuthoritative, isRecommended, conflictGroupId,
+// conditionText, exceptionText, normalizationNote, effectiveDate, versionLabel,
+// sourceChunkId. documentId and citation are now nullable (manual rules).
 export const ExtractedRuleSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
-  documentId: z.string().uuid(),
+  documentId: z.string().uuid().nullable().optional(),
   ruleCode: z.string(),
   title: z.string(),
   description: z.string().nullable().optional(),
@@ -95,15 +99,27 @@ export const ExtractedRuleSchema = z.object({
   valueMax: z.number().nullable().optional(),
   units: z.string().nullable().optional(),
   applicability: ApplicabilitySchema,
-  citation: RuleCitationSchema,
+  citation: RuleCitationSchema.nullable().optional(),
   confidence: z.number().min(0).max(1),
   status: z.enum(RULE_STATUSES),
   extractionNotes: z.string().nullable().optional(),
+  // V2 authority + provenance fields
+  sourceKind: z.enum(RULE_SOURCE_KINDS).default("extracted"),
+  isAuthoritative: z.boolean().default(false),
+  isRecommended: z.boolean().default(false),
+  conflictGroupId: z.string().uuid().nullable().optional(),
+  conditionText: z.string().nullable().optional(),
+  exceptionText: z.string().nullable().optional(),
+  normalizationNote: z.string().nullable().optional(),
+  effectiveDate: z.string().nullable().optional(),
+  versionLabel: z.string().nullable().optional(),
+  sourceChunkId: z.string().uuid().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
 
-// branch_name, model_name, commit_message are nullable in speckle_model_refs.
+// branch_name, model_name, commit_message, synced_at are nullable in speckle_model_refs.
+// synced_at is stamped when derive_geometry_snapshot_for_model completes.
 export const SpeckleModelRefSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
@@ -113,6 +129,7 @@ export const SpeckleModelRefSchema = z.object({
   modelName: z.string().nullable().optional(),
   commitMessage: z.string().nullable().optional(),
   selectedAt: z.string(),
+  syncedAt: z.string().datetime({ offset: true }).nullable().optional(),
 })
 
 // units and computationNotes are serialised as null by Pydantic when unset.
@@ -127,7 +144,7 @@ export const GeometrySnapshotMetricSchema = z.object({
 export const GeometrySnapshotSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
-  runId: z.string().uuid(),
+  runId: z.string().uuid().nullable().optional(),
   speckleModelRefId: z.string().uuid(),
   siteBoundary: PolygonSchema.nullable().optional(),
   buildingFootprints: z.array(
@@ -290,4 +307,190 @@ export const DeleteDocumentInputSchema = z.object({
 
 export const DeleteRunInputSchema = z.object({
   runId: z.string().uuid(),
+})
+
+// ── Project-level (no run required) ─────────────────────────────────────────
+
+/**
+ * Register a document directly against the project, without associating it
+ * with a specific run. Used by the project-level document upload flow.
+ */
+export const RegisterProjectDocumentInputSchema = z.object({
+  projectId: z.string().uuid(),
+  storagePath: z.string().min(1),
+  fileName: z.string().min(1),
+  mimeType: z.string().min(1),
+  documentType: z.enum(["zoning_code", "building_code", "project_doc", "other"]),
+})
+
+export const ProjectDocumentsResponseSchema = z.object({
+  documents: z.array(UploadedDocumentSchema),
+  total: z.number().int().nonnegative(),
+})
+
+/**
+ * Sync a Speckle model directly against the project, without associating it
+ * with a specific run. Used by the project-level model sync flow.
+ * Returns a SpeckleModelRef that belongs to the project.
+ */
+export const SyncProjectModelInputSchema = z.object({
+  projectId: z.string().uuid(),
+  streamId: z.string().min(1),
+  versionId: z.string().min(1),
+  branchName: z.string().optional(),
+  modelName: z.string().optional(),
+})
+
+export const ProjectModelRefsResponseSchema = z.object({
+  modelRefs: z.array(SpeckleModelRefSchema),
+  total: z.number().int().nonnegative(),
+})
+
+export const SetActiveProjectModelInputSchema = z.object({
+  projectId: z.string().uuid(),
+  modelRefId: z.string().uuid(),
+})
+
+export const DeleteProjectModelInputSchema = z.object({
+  projectId: z.string().uuid(),
+  modelRefId: z.string().uuid(),
+})
+
+/**
+ * Response from GET /projects/{id}/active-model.
+ * The backend returns null (JSON `null`) when no active model is set.
+ */
+export const ProjectActiveModelResponseSchema = SpeckleModelRefSchema.nullable()
+
+/**
+ * Assign an existing project SpeckleModelRef to a run without creating a new row.
+ * Used when the user picks from the project model library in SpeckleModelPicker.
+ * Mirrors AssignModelRefRequest in backend/app/core/schemas.py.
+ */
+export const AssignModelRefInputSchema = z.object({
+  runId: z.string().uuid(),
+  modelRefId: z.string().uuid(),
+})
+
+/**
+ * Assign an existing project SiteContext to a run without creating a new row.
+ * Used when the user picks from the project context library in SiteContextPicker.
+ * Mirrors AssignSiteContextRequest in backend/app/core/schemas.py.
+ */
+export const AssignSiteContextInputSchema = z.object({
+  runId: z.string().uuid(),
+  siteContextId: z.string().uuid(),
+})
+
+/**
+ * Create a standalone SiteContext for a project (no run required).
+ * Used from Project Overview to add a new default site context directly.
+ * Mirrors CreateProjectSiteContextRequest in backend/app/core/schemas.py.
+ */
+export const CreateProjectSiteContextInputSchema = z.object({
+  projectId: z.string().uuid(),
+  address: z.string().optional(),
+  manualOverrides: z.object({
+    municipality: z.string().optional(),
+    jurisdictionCode: z.string().optional(),
+    zoningDistrict: z.string().optional(),
+    parcelAreaM2: z.number().optional(),
+  }).optional(),
+  setAsDefault: z.boolean().optional(),
+})
+
+export const DeleteProjectSiteContextInputSchema = z.object({
+  projectId: z.string().uuid(),
+  siteContextId: z.string().uuid(),
+})
+
+// ── Project-level site context ────────────────────────────────────────────────
+
+export const SetDefaultSiteContextInputSchema = z.object({
+  projectId: z.string().uuid(),
+  siteContextId: z.string().uuid(),
+})
+
+export const ProjectSiteContextsResponseSchema = z.object({
+  siteContexts: z.array(SiteContextSchema),
+  total: z.number().int().nonnegative(),
+  defaultSiteContextId: z.string().uuid().nullable().optional(),
+})
+
+/**
+ * Response from GET /projects/{id}/default-site-context.
+ * The backend returns null (JSON `null`) when no default is set.
+ */
+export const ProjectDefaultSiteContextResponseSchema = SiteContextSchema.nullable()
+
+// ── Rule management (V2) ─────────────────────────────────────────────────────
+
+export const ProjectExtractionOptionsSchema = z.object({
+  projectId: z.string().uuid(),
+  ruleAutoApplyEnabled: z.boolean().default(false),
+  ruleAutoApplyConfidenceThreshold: z.number().min(0).max(1).default(0.82),
+  manualVerificationRequired: z.boolean().default(true),
+  autoResolveConflicts: z.boolean().default(false),
+})
+
+export const SetProjectExtractionOptionsInputSchema = z.object({
+  projectId: z.string().uuid(),
+  ruleAutoApplyEnabled: z.boolean().optional(),
+  ruleAutoApplyConfidenceThreshold: z.number().min(0).max(1).optional(),
+  manualVerificationRequired: z.boolean().optional(),
+  autoResolveConflicts: z.boolean().optional(),
+})
+
+export const ApproveRuleInputSchema = z.object({
+  ruleId: z.string().uuid(),
+})
+
+export const RejectRuleInputSchema = z.object({
+  ruleId: z.string().uuid(),
+})
+
+/**
+ * Fields the user can set when adding a manual rule.
+ * Mirrors CreateManualRuleRequest in backend/app/core/schemas.py.
+ */
+export const CreateManualRuleInputSchema = z.object({
+  projectId: z.string().uuid(),
+  runId: z.string().uuid().optional(),
+  ruleCode: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().optional(),
+  metricKey: z.enum(METRIC_KEYS),
+  operator: z.enum(["<", "<=", ">", ">=", "=", "between"]),
+  valueNumber: z.number().optional(),
+  valueMin: z.number().optional(),
+  valueMax: z.number().optional(),
+  units: z.string().optional(),
+  applicability: ApplicabilitySchema.optional(),
+  conditionText: z.string().optional(),
+  exceptionText: z.string().optional(),
+  effectiveDate: z.string().optional(),
+  versionLabel: z.string().optional(),
+  extractionNotes: z.string().optional(),
+})
+
+/**
+ * Editable fields for an existing manual rule (source_kind='manual').
+ * Mirrors UpdateManualRuleRequest in backend/app/core/schemas.py.
+ */
+export const UpdateManualRuleInputSchema = z.object({
+  ruleId: z.string().uuid(),
+  ruleCode: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  description: z.string().nullable().optional(),
+  operator: z.enum(["<", "<=", ">", ">=", "=", "between"]).optional(),
+  valueNumber: z.number().nullable().optional(),
+  valueMin: z.number().nullable().optional(),
+  valueMax: z.number().nullable().optional(),
+  units: z.string().nullable().optional(),
+  applicability: ApplicabilitySchema.optional(),
+  conditionText: z.string().nullable().optional(),
+  exceptionText: z.string().nullable().optional(),
+  effectiveDate: z.string().nullable().optional(),
+  versionLabel: z.string().nullable().optional(),
+  extractionNotes: z.string().nullable().optional(),
 })

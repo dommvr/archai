@@ -11,10 +11,15 @@ interface SiteContextFormProps {
   onSubmit: (input: IngestSiteInput) => Promise<void>
   /** Existing persisted site context — used to prefill fields on load/run-switch. */
   siteContext?: SiteContext | null
+  /**
+   * Project-level default site context — used to pre-fill fields when this run
+   * does not yet have a site context saved. Lower priority than `siteContext`.
+   */
+  projectDefaultSiteContext?: SiteContext | null
   isLoading?: boolean
 }
 
-export function SiteContextForm({ runId, onSubmit, siteContext, isLoading }: SiteContextFormProps) {
+export function SiteContextForm({ runId, onSubmit, siteContext, projectDefaultSiteContext, isLoading }: SiteContextFormProps) {
   const [formState, setFormState] = useState({
     address: '',
     municipality: '',
@@ -24,15 +29,19 @@ export function SiteContextForm({ runId, onSubmit, siteContext, isLoading }: Sit
   })
   const [submitting, setSubmitting] = useState(false)
 
+  // Use run's own context if set; fall back to project default for pre-fill.
+  // Re-run when runId changes (new run), when the persisted context loads/changes,
+  // or when the project default arrives asynchronously after first render.
   useEffect(() => {
+    const src = siteContext ?? projectDefaultSiteContext ?? null
     setFormState({
-      address: siteContext?.address ?? '',
-      municipality: siteContext?.municipality ?? '',
-      jurisdictionCode: siteContext?.jurisdictionCode ?? '',
-      zoningDistrict: siteContext?.zoningDistrict ?? '',
-      parcelAreaM2: siteContext?.parcelAreaM2 != null ? String(siteContext.parcelAreaM2) : '',
+      address: src?.address ?? '',
+      municipality: src?.municipality ?? '',
+      jurisdictionCode: src?.jurisdictionCode ?? '',
+      zoningDistrict: src?.zoningDistrict ?? '',
+      parcelAreaM2: src?.parcelAreaM2 != null ? String(src.parcelAreaM2) : '',
     })
-  }, [runId, siteContext])
+  }, [runId, siteContext, projectDefaultSiteContext])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -56,6 +65,7 @@ export function SiteContextForm({ runId, onSubmit, siteContext, isLoading }: Sit
 
   const disabled = isLoading || submitting
   const hasSaved = siteContext != null
+  const isPreFilled = !hasSaved && projectDefaultSiteContext != null
 
   return (
     <form onSubmit={handleSubmit} className="rounded-xl border border-archai-graphite bg-archai-charcoal p-4 space-y-4">
@@ -64,9 +74,11 @@ export function SiteContextForm({ runId, onSubmit, siteContext, isLoading }: Sit
           <MapPin className="h-4 w-4 text-archai-orange" />
           <p className="text-sm font-medium text-white">Site Context</p>
         </div>
-        {hasSaved && (
+        {hasSaved ? (
           <span className="text-[10px] text-emerald-400 font-medium">Saved</span>
-        )}
+        ) : isPreFilled ? (
+          <span className="text-[10px] text-archai-amber font-medium">Pre-filled from project default</span>
+        ) : null}
       </div>
 
       <div className="space-y-3">

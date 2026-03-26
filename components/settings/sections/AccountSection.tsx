@@ -47,11 +47,19 @@ export function AccountSection({ user }: AccountSectionProps) {
     (user.user_metadata?.name as string | undefined) ??
     'Not set'
 
-  // Professional profile form state
-  const [company, setCompany] = useState('')
-  const [role, setRole] = useState('')
-  const [timezone, setTimezone] = useState('UTC')
-  const [defaultUnits, setDefaultUnits] = useState<'metric' | 'imperial'>('metric')
+  // Professional profile form state — seeded from signup metadata
+  const [company, setCompany] = useState(
+    (user.user_metadata?.company_or_studio as string | undefined) ?? ''
+  )
+  const [role, setRole] = useState(
+    (user.user_metadata?.role as string | undefined) ?? ''
+  )
+  const [timezone, setTimezone] = useState(
+    (user.user_metadata?.timezone as string | undefined) ?? 'UTC'
+  )
+  const [defaultUnits, setDefaultUnits] = useState<'metric' | 'imperial'>(
+    ((user.user_metadata?.default_units as string | undefined) === 'imperial' ? 'imperial' : 'metric')
+  )
   const [defaultRegion, setDefaultRegion] = useState('')
 
   const [saving, setSaving] = useState(false)

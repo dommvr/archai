@@ -2,10 +2,25 @@
 
 import { useRef, useEffect } from 'react'
 import { FloatingToolbar } from './FloatingToolbar'
-import { Box } from 'lucide-react'
+import { Box, Eye } from 'lucide-react'
+
+interface ViewerActiveModelRef {
+  streamId: string
+  versionId: string
+  modelName?: string | null
+  branchName?: string | null
+}
 
 interface ViewerPanelProps {
   projectId?: string
+  /**
+   * The active project model ref — used to show model identity in the
+   * placeholder and will seed viewer.loadObject() once @speckle/viewer is mounted.
+   * SPECKLE VIEWER WILL BE MOUNTED HERE
+   */
+  activeModelRef?: ViewerActiveModelRef | null
+  /** When true, this is a temporary preview (not the project active model) */
+  isPreview?: boolean
 }
 
 /**
@@ -20,30 +35,45 @@ interface ViewerPanelProps {
  * 3. In the useEffect below, mount the viewer:
  *    const viewer = new Viewer(viewerRef.current!, DefaultViewerParams)
  *    await viewer.init()
- * 4. Load a stream: viewer.loadObject(streamUrl, token)
+ * 4. Load stream: viewer.loadObject(`https://speckle.xyz/streams/${activeModelRef.streamId}/objects/${activeModelRef.versionId}`, token)
  * 5. See CLAUDE.md → Playbooks → Integrating Speckle viewer logic
  *
  * SPECKLE VIEWER WILL BE MOUNTED HERE
  */
-export function ViewerPanel({ projectId }: ViewerPanelProps) {
+export function ViewerPanel({ projectId, activeModelRef, isPreview }: ViewerPanelProps) {
   const viewerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     // SPECKLE VIEWER WILL BE MOUNTED HERE
-    // Future mounting code:
+    // When @speckle/viewer is installed, replace this block with:
     // import('@speckle/viewer').then(({ Viewer, DefaultViewerParams }) => {
     //   if (!viewerRef.current) return
     //   const viewer = new Viewer(viewerRef.current, DefaultViewerParams)
     //   viewer.init().then(() => {
-    //     console.log('Speckle viewer initialized for project:', projectId)
+    //     if (activeModelRef) {
+    //       const url = `https://speckle.xyz/streams/${activeModelRef.streamId}/objects/${activeModelRef.versionId}`
+    //       viewer.loadObject(url, /* token */)
+    //     }
     //   })
     // })
 
-    console.log('ViewerPanel mounted — Speckle viewer placeholder active for project:', projectId)
-  }, [projectId])
+    console.log(
+      'ViewerPanel mounted — Speckle viewer placeholder active',
+      { projectId, activeModelRef: activeModelRef?.streamId ?? 'none' },
+    )
+  }, [projectId, activeModelRef])
 
   return (
     <div className="relative w-full h-full bg-archai-black bg-blueprint-grid overflow-hidden">
+      {/* Preview mode banner — shown when viewing a non-active model */}
+      {isPreview && activeModelRef && (
+        <div className="absolute top-0 inset-x-0 z-10 flex items-center gap-2 bg-archai-amber/10 border-b border-archai-amber/20 px-4 py-1.5 pointer-events-none">
+          <Eye className="h-3 w-3 text-archai-amber shrink-0" />
+          <p className="text-[11px] text-archai-amber">
+            Preview — <span className="font-medium">{activeModelRef.modelName ?? 'Speckle Model'}</span> (not the active model)
+          </p>
+        </div>
+      )}
       {/* Speckle Viewer Mount Point */}
       {/* SPECKLE VIEWER WILL BE MOUNTED HERE */}
       <div
@@ -53,17 +83,33 @@ export function ViewerPanel({ projectId }: ViewerPanelProps) {
         aria-label="3D model viewer"
       />
 
-      {/* Placeholder UI — shown until Speckle viewer is mounted */}
+      {/* Placeholder UI — replaced by the mounted Speckle viewer */}
       <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none select-none">
-        <div className="flex flex-col items-center gap-4 opacity-30">
-          <div className="w-16 h-16 rounded-xl border border-archai-graphite flex items-center justify-center">
-            <Box className="h-7 w-7 text-muted-foreground" />
+        <div className="flex flex-col items-center gap-4">
+          <div className={`w-16 h-16 rounded-xl border flex items-center justify-center ${activeModelRef ? 'border-emerald-400/20 bg-emerald-400/5' : 'border-archai-graphite opacity-30'}`}>
+            <Box className={`h-7 w-7 ${activeModelRef ? 'text-emerald-400/60' : 'text-muted-foreground'}`} />
           </div>
           <div className="text-center">
-            <p className="text-xs font-medium text-muted-foreground mb-1">3D Viewer</p>
-            <p className="text-[10px] text-muted-foreground/60">
-              Connect a Speckle stream or upload a model to begin
-            </p>
+            {activeModelRef ? (
+              <>
+                <p className="text-xs font-medium text-white/80 mb-0.5">
+                  {activeModelRef.modelName ?? 'Speckle Model'}
+                </p>
+                <p className="font-mono text-[10px] text-muted-foreground/60 mb-0.5">
+                  {activeModelRef.streamId} / {activeModelRef.versionId}
+                </p>
+                <p className="text-[10px] text-muted-foreground/40">
+                  Speckle viewer integration pending — model identified
+                </p>
+              </>
+            ) : (
+              <div className="opacity-30">
+                <p className="text-xs font-medium text-muted-foreground mb-1">3D Viewer</p>
+                <p className="text-[10px] text-muted-foreground/60">
+                  Sync a Speckle model and set it as active to load it here
+                </p>
+              </div>
+            )}
           </div>
         </div>
 

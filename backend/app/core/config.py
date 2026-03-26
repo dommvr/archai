@@ -67,7 +67,11 @@ class Settings(BaseSettings):
 
     # ── LLM Rule Extraction ───────────────────────────────────
     # TODO: set when LangGraph agent is wired
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-5.4"
+    # Cheaper/faster model used for chunk classification only.
+    # Override with CLASSIFICATION_MODEL env var to use a different model
+    # than the full extraction pass (e.g. "gpt-4o-mini" for lower cost).
+    classification_model: str = "gpt-5.4-mini"
     rule_extraction_confidence_threshold: float = 0.6
 
     # ── Speckle ───────────────────────────────────────────────

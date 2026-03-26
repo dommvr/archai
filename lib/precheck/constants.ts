@@ -17,10 +17,23 @@ export type PrecheckRunStatus = (typeof PRECHECK_RUN_STATUSES)[number]
 export const RULE_STATUSES = [
   "draft",
   "reviewed",
+  "approved",
+  "auto_approved",
+  "superseded",
   "rejected",
 ] as const
 
 export type RuleStatus = (typeof RULE_STATUSES)[number]
+
+export const RULE_SOURCE_KINDS = ["extracted", "manual"] as const
+export type RuleSourceKind = (typeof RULE_SOURCE_KINDS)[number]
+
+/** Statuses that count as authoritative for compliance scoring. */
+export const AUTHORITATIVE_RULE_STATUSES = new Set<RuleStatus>([
+  "reviewed",
+  "approved",
+  "auto_approved",
+])
 
 export const ISSUE_SEVERITIES = [
   "info",

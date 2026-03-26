@@ -451,6 +451,7 @@ class SpeckleService:
             "project_id":           str(run.project_id),
             "run_id":               str(run.id),
             "speckle_model_ref_id": str(model_ref.id),
+            # run_id is intentionally set (run-scoped snapshot)
             # TODO: populate site_boundary from site_context.parcel_boundary once
             #       fetch_version_objects() returns real data and origin alignment
             #       is possible.
@@ -470,6 +471,94 @@ class SpeckleService:
         log.info(
             "Geometry snapshot created: id=%s run=%s metrics=%d",
             snapshot.id, run.id, len(metrics),
+        )
+        return snapshot
+
+    async def derive_geometry_snapshot_for_model(
+        self,
+        project_id: UUID,
+        model_ref: SpeckleModelRef,
+        site_context: SiteContext | None = None,
+    ) -> GeometrySnapshot:
+        """
+        Derives a project-level GeometrySnapshot for a model ref without a run.
+
+        Deletes any existing project-level snapshot for this model ref first
+        (idempotent — safe to call on resync).  run_id is left NULL so it is
+        clearly distinguished from run-scoped snapshots.
+        """
+        await self._repo.delete_snapshots_for_model_ref(model_ref.id)
+
+        now = datetime.now(timezone.utc)
+        objects = await self.fetch_version_objects(model_ref.stream_id, model_ref.version_id)
+        parcel_area_m2 = site_context.parcel_area_m2 if site_context else None
+
+        if not objects:
+            metrics: list[GeometrySnapshotMetric] = []
+            raw_metrics: dict[str, Any] = {
+                "fetch_skipped": True,
+                "reason": (
+                    "SPECKLE_TOKEN not set — configure SPECKLE_TOKEN in .env to enable "
+                    "geometry extraction"
+                    if not settings.speckle_token
+                    else "fetch returned empty response — check stream_id and version_id"
+                ),
+                "metrics_derived": 0,
+            }
+        else:
+            all_elements = _get_elements_from_objects(objects)
+            candidates = _normalize_elements(all_elements)
+            candidates, unit_report = detect_and_normalize_units(candidates, all_elements)
+            metrics, derivation_diagnostics = _derive_metrics_from_candidates(
+                candidates, parcel_area_m2
+            )
+            debug = objects.get("__debug", {})
+            raw_metrics = {
+                "fetch_skipped": False,
+                "total_object_count": debug.get("total_object_count", 0),
+                "stream_id": debug.get("stream_id"),
+                "object_hash": debug.get("object_hash"),
+                "type_counts": debug.get("type_counts", {}),
+                "metrics_derived": len(metrics),
+                "metric_keys": [m.key.value for m in metrics],
+                "unit_normalization": unit_report.to_dict() if unit_report is not None else None,
+                "connector_styles_matched": candidates.connector_styles_matched,
+                "objects_by_broad_type": candidates.objects_by_broad_type,
+                "extraction_notes": candidates.extraction_notes,
+                "metric_derivation": derivation_diagnostics,
+            }
+
+        if metrics:
+            log.info(
+                "derive_geometry_snapshot_for_model: %d metrics for model_ref=%s — %s",
+                len(metrics), model_ref.id,
+                ", ".join(f"{m.key.value}={m.value}" for m in metrics),
+            )
+        else:
+            log.warning(
+                "derive_geometry_snapshot_for_model: 0 metrics for model_ref=%s. reason: %s",
+                model_ref.id,
+                raw_metrics.get("reason") or "see extraction_notes in raw_metrics",
+            )
+
+        row: dict[str, Any] = {
+            "id":                   str(uuid4()),
+            "project_id":           str(project_id),
+            "run_id":               None,   # project-level snapshot — no run
+            "speckle_model_ref_id": str(model_ref.id),
+            "site_boundary":        None,
+            "building_footprints":  [],
+            "floors":               [],
+            "metrics":              [m.model_dump() for m in metrics],
+            "raw_metrics":          raw_metrics,
+            "created_at":           now.isoformat(),
+        }
+        snapshot = await self._repo.create_geometry_snapshot(row)
+        # Stamp synced_at on the model ref so the UI can show last sync time.
+        await self._repo.set_model_ref_synced_at(model_ref.id, now)
+        log.info(
+            "Project-level geometry snapshot created: id=%s model_ref=%s metrics=%d synced_at=%s",
+            snapshot.id, model_ref.id, len(metrics), now.isoformat(),
         )
         return snapshot
 

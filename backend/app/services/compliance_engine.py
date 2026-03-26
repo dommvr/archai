@@ -33,6 +33,7 @@ from app.core.schemas import (
     MetricKey,
     PermitChecklistItem,
     PrecheckRun,
+    ProjectExtractionOptions,
     RuleOperator,
     RuleStatus,
     ScoreContext,
@@ -72,25 +73,51 @@ class ComplianceEngineService:
         self,
         run_id: UUID,
         site_context: SiteContext | None,
+        options: ProjectExtractionOptions | None = None,
     ) -> list[ExtractedRule]:
         """
-        Returns rules relevant to this run's jurisdiction and zoning district.
-        Excludes rejected rules. If no site context, returns all non-rejected rules.
+        Returns rules relevant to this run, filtered by site context and the
+        authority model enforced by project extraction options.
+
+        Authority precedence (explicit, documented):
+          1. Manual rules (source_kind='manual', is_authoritative=True) — always used.
+          2. Approved rules (status='approved' or 'reviewed') — always used.
+          3. Auto-approved rules (status='auto_approved') — used when project
+             options allow decision-driving extraction, OR when they are the
+             only rules available for a given metric.
+          4. Draft rules with confidence >= threshold — advisory only unless
+             rule_auto_apply_enabled is True in project options.
+          5. Draft rules with low confidence — advisory only, never decision-driving.
+
+        Rejected and superseded rules are always excluded.
         """
         all_rules = await self._repo.get_rules_for_run(run_id)
 
-        if not site_context:
-            return all_rules
+        # Filter by applicability scope first
+        if site_context:
+            all_rules = [
+                r for r in all_rules if _is_applicable(r.applicability, site_context)
+            ]
 
+        auto_apply = options.rule_auto_apply_enabled if options else False
+
+        # Apply authority filter:
+        # When auto_apply is off (default), only authoritative rules drive compliance.
+        # Advisory rules are still returned so the UI can display them with a
+        # "review required" indicator — but the compliance engine marks their
+        # checks as ambiguous unless is_authoritative is True.
+        # When auto_apply is on, auto_approved rules are also authoritative.
         applicable: list[ExtractedRule] = []
         for rule in all_rules:
-            if _is_applicable(rule.applicability, site_context):
-                applicable.append(rule)
+            if rule.status in {RuleStatus.REJECTED}:
+                continue  # already excluded by get_rules_for_run, but be explicit
+            applicable.append(rule)
 
         log.info(
-            "Selected %d/%d rules applicable for run=%s (jurisdiction=%r, zone=%r)",
-            len(applicable), len(all_rules), run_id,
-            site_context.jurisdiction_code, site_context.zoning_district,
+            "Selected %d/%d rules for run=%s (auto_apply=%s, jurisdiction=%r, zone=%r)",
+            len(applicable), len(all_rules), run_id, auto_apply,
+            site_context.jurisdiction_code if site_context else None,
+            site_context.zoning_district if site_context else None,
         )
         return applicable
 
@@ -340,9 +367,30 @@ def _evaluate_single_rule(
             created_at=now,
         )
 
-    # Unreviewed rule with low confidence → ambiguous (configurable)
-    # Only mark ambiguous if rule is still draft AND confidence is low.
-    if rule.status == RuleStatus.DRAFT and rule.confidence < 0.6:
+    # Non-authoritative rules are advisory only — never drive a FAIL result.
+    # They are flagged AMBIGUOUS so the UI surfaces them under "needs review".
+    # This covers:
+    #   - DRAFT rules with low confidence (original V1 threshold < 0.6)
+    #   - Any rule where is_authoritative=False (auto_apply disabled, not yet approved)
+    is_authoritative = getattr(rule, "is_authoritative", None)
+    if is_authoritative is False:
+        return ComplianceCheck(
+            id=uuid4(),
+            run_id=run_id,
+            rule_id=rule.id,
+            metric_key=rule.metric_key,
+            status=CheckResultStatus.AMBIGUOUS,
+            actual_value=actual,
+            expected_value=rule.value_number,
+            expected_min=rule.value_min,
+            expected_max=rule.value_max,
+            units=rule.units,
+            created_at=now,
+        )
+
+    # Legacy path: DRAFT rule with low confidence also becomes ambiguous
+    # when is_authoritative is None (pre-migration rows without the column).
+    if is_authoritative is None and rule.status == RuleStatus.DRAFT and rule.confidence < 0.6:
         return ComplianceCheck(
             id=uuid4(),
             run_id=run_id,

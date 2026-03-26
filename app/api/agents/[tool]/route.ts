@@ -3,15 +3,29 @@ import type { ZodType } from 'zod'
 import { getSupabaseServerClient } from '@/lib/supabase/server'
 import type { ToolId } from '@/types'
 import {
+  ApproveRuleInputSchema,
+  AssignModelRefInputSchema,
+  AssignSiteContextInputSchema,
+  CreateManualRuleInputSchema,
   CreatePrecheckRunInputSchema,
+  CreateProjectSiteContextInputSchema,
+  DeleteProjectSiteContextInputSchema,
   DeleteDocumentInputSchema,
+  DeleteProjectModelInputSchema,
   DeleteRunInputSchema,
   EvaluateComplianceInputSchema,
   ExtractRulesInputSchema,
   IngestDocumentsInputSchema,
   IngestSiteInputSchema,
+  RejectRuleInputSchema,
   RegisterDocumentInputSchema,
+  RegisterProjectDocumentInputSchema,
+  SetActiveProjectModelInputSchema,
+  SetDefaultSiteContextInputSchema,
+  SetProjectExtractionOptionsInputSchema,
+  SyncProjectModelInputSchema,
   SyncSpeckleModelInputSchema,
+  UpdateManualRuleInputSchema,
 } from '@/lib/precheck/schemas'
 
 type PrecheckAction =
@@ -20,10 +34,26 @@ type PrecheckAction =
   | 'ingest_documents'
   | 'extract_rules'
   | 'sync_speckle_model'
+  | 'assign_model_ref'
+  | 'assign_site_context'
   | 'evaluate_compliance'
   | 'register_document'
   | 'delete_document'
   | 'delete_run'
+  // Project-level actions (no run required)
+  | 'register_project_document'
+  | 'sync_project_model'
+  | 'set_active_project_model'
+  | 'delete_project_model'
+  | 'set_default_site_context'
+  | 'create_project_site_context'
+  | 'delete_project_site_context'
+  // Rule management (V2)
+  | 'approve_rule'
+  | 'reject_rule'
+  | 'create_manual_rule'
+  | 'update_manual_rule'
+  | 'set_extraction_options'
 
 type PrecheckPayload = Record<string, unknown>
 
@@ -244,6 +274,34 @@ async function handlePrecheckPost(
       })
     }
 
+    case 'assign_model_ref': {
+      const parsed = validatePayload(AssignModelRefInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/assign-model-ref`,
+        method: 'POST',
+        body: { modelRefId: parsed.modelRefId },
+      })
+    }
+
+    case 'assign_site_context': {
+      const parsed = validatePayload(AssignSiteContextInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/assign-site-context`,
+        method: 'POST',
+        body: { siteContextId: parsed.siteContextId },
+      })
+    }
+
     case 'evaluate_compliance': {
       const parsed = validatePayload(EvaluateComplianceInputSchema, payload)
       if (parsed instanceof NextResponse) {
@@ -302,6 +360,190 @@ async function handlePrecheckPost(
       })
     }
 
+    // ── Project-level actions (no run required) ────────────────────────────
+
+    case 'register_project_document': {
+      const parsed = validatePayload(RegisterProjectDocumentInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/documents`,
+        method: 'POST',
+        body: {
+          storagePath: parsed.storagePath,
+          fileName: parsed.fileName,
+          mimeType: parsed.mimeType,
+          documentType: parsed.documentType,
+        },
+      })
+    }
+
+    case 'sync_project_model': {
+      const parsed = validatePayload(SyncProjectModelInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/model-refs`,
+        method: 'POST',
+        body: {
+          streamId: parsed.streamId,
+          versionId: parsed.versionId,
+          branchName: parsed.branchName,
+          modelName: parsed.modelName,
+        },
+      })
+    }
+
+    case 'set_active_project_model': {
+      const parsed = validatePayload(SetActiveProjectModelInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/active-model`,
+        method: 'POST',
+        body: { modelRefId: parsed.modelRefId },
+      })
+    }
+
+    case 'delete_project_model': {
+      const parsed = validatePayload(DeleteProjectModelInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/model-refs/${parsed.modelRefId}`,
+        method: 'DELETE',
+      })
+    }
+
+    case 'set_default_site_context': {
+      const parsed = validatePayload(SetDefaultSiteContextInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/default-site-context`,
+        method: 'POST',
+        body: { siteContextId: parsed.siteContextId },
+      })
+    }
+
+    case 'create_project_site_context': {
+      const parsed = validatePayload(CreateProjectSiteContextInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/site-contexts`,
+        method: 'POST',
+        body: {
+          address: parsed.address,
+          manualOverrides: parsed.manualOverrides,
+          setAsDefault: parsed.setAsDefault ?? false,
+        },
+      })
+    }
+
+    case 'delete_project_site_context': {
+      const parsed = validatePayload(DeleteProjectSiteContextInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/site-contexts/${parsed.siteContextId}`,
+        method: 'DELETE',
+      })
+    }
+
+    // ── Rule management (V2) ───────────────────────────────────────────────
+
+    case 'approve_rule': {
+      const parsed = validatePayload(ApproveRuleInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/rules/${parsed.ruleId}/approve`,
+        method: 'POST',
+      })
+    }
+
+    case 'reject_rule': {
+      const parsed = validatePayload(RejectRuleInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/rules/${parsed.ruleId}/reject`,
+        method: 'POST',
+      })
+    }
+
+    case 'create_manual_rule': {
+      const parsed = validatePayload(CreateManualRuleInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${parsed.projectId}/rules`,
+        method: 'POST',
+        body: parsed,
+      })
+    }
+
+    case 'update_manual_rule': {
+      const parsed = validatePayload(UpdateManualRuleInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      const { ruleId, ...updates } = parsed
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/rules/${ruleId}`,
+        method: 'PATCH',
+        body: updates,
+      })
+    }
+
+    case 'set_extraction_options': {
+      const parsed = validatePayload(SetProjectExtractionOptionsInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      const { projectId, ...options } = parsed
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/extraction-options`,
+        method: 'PUT',
+        body: options,
+      })
+    }
+
     default:
       return NextResponse.json({ error: `Unknown precheck action: ${action}` }, { status: 400 })
   }
@@ -311,6 +553,7 @@ async function handlePrecheckGet(request: NextRequest, accessToken: string) {
   const { searchParams } = new URL(request.url)
   const runId = searchParams.get('runId')
   const projectId = searchParams.get('projectId')
+  const scope = searchParams.get('scope')
 
   if (runId) {
     return proxyFastApi({
@@ -321,6 +564,76 @@ async function handlePrecheckGet(request: NextRequest, accessToken: string) {
   }
 
   if (projectId) {
+    // Project-level scoped queries
+    if (scope === 'documents') {
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/documents`,
+        method: 'GET',
+      })
+    }
+
+    if (scope === 'model_refs') {
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/model-refs`,
+        method: 'GET',
+      })
+    }
+
+    if (scope === 'active_model') {
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/active-model`,
+        method: 'GET',
+      })
+    }
+
+    if (scope === 'site_contexts') {
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/site-contexts`,
+        method: 'GET',
+      })
+    }
+
+    if (scope === 'default_site_context') {
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/default-site-context`,
+        method: 'GET',
+      })
+    }
+
+    if (scope === 'rules') {
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/rules`,
+        method: 'GET',
+      })
+    }
+
+    if (scope === 'extraction_options') {
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/extraction-options`,
+        method: 'GET',
+      })
+    }
+
+    if (scope === 'model_snapshot') {
+      const modelRefId = searchParams.get('modelRefId')
+      if (!modelRefId) {
+        return NextResponse.json({ error: 'Missing modelRefId parameter' }, { status: 400 })
+      }
+      return proxyFastApi({
+        accessToken,
+        path: `/projects/${projectId}/model-refs/${modelRefId}/snapshot`,
+        method: 'GET',
+      })
+    }
+
+    // Default: list precheck runs for the project
     return proxyFastApi({
       accessToken,
       path: `/projects/${projectId}/precheck-runs`,
@@ -369,7 +682,7 @@ function validatePayload<T>(
 async function proxyFastApi(input: {
   accessToken: string
   path: string
-  method: 'GET' | 'POST' | 'DELETE'
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   body?: unknown
 }) {
   const baseUrl = getFastApiBaseUrl()

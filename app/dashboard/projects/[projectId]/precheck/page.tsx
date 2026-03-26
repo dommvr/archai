@@ -1,16 +1,13 @@
 import { redirect } from 'next/navigation'
 import { getSupabaseServerClient } from '@/lib/supabase/server'
-import { PrecheckWorkspace } from '@/components/dashboard/precheck/PrecheckWorkspace'
+import { PrecheckWorkspaceWrapper } from '@/components/dashboard/precheck/PrecheckWorkspaceWrapper'
 
 /**
  * Project-scoped Zoning & Permit Check (Tool 1).
  *
- * The projectId in the URL is the canonical source of truth for which
- * project's runs, site context, rules, and compliance results are loaded.
- * PrecheckWorkspace receives it directly — no global state required.
- *
- * Verifies the project belongs to the authenticated user before rendering.
- * Redirects to /dashboard if the projectId is invalid or unauthorised.
+ * Loads the project's active model ref (stored client-side) and passes it
+ * to PrecheckWorkspace so new runs are pre-filled with the project default.
+ * The projectId is the canonical key — no global state required.
  */
 export default async function ProjectPrecheckPage({
   params,
@@ -33,7 +30,7 @@ export default async function ProjectPrecheckPage({
   if (!project) redirect('/dashboard')
 
   return (
-    <PrecheckWorkspace
+    <PrecheckWorkspaceWrapper
       user={{
         id: user.id,
         email: user.email ?? undefined,

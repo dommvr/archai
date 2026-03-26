@@ -29,11 +29,13 @@ const STATUS_ORDER: PrecheckRunStatus[] = [
 type StepState = 'done' | 'active' | 'idle' | 'error'
 
 interface StepDataOverrides {
-  hasSiteContext?:       boolean
-  hasDocuments?:         boolean
-  hasRules?:             boolean
-  hasModelRef?:          boolean
-  hasGeometrySnapshot?:  boolean
+  hasSiteContext?:        boolean
+  hasDocuments?:          boolean
+  /** True when docs are UI-selected but not yet ingested — shows amber spinner. */
+  hasDocumentsPending?:   boolean
+  hasRules?:              boolean
+  hasModelRef?:           boolean
+  hasGeometrySnapshot?:   boolean
 }
 
 /**
@@ -60,7 +62,9 @@ function resolveStepState(
     case 'ingesting_site':
       return overrides.hasSiteContext ? 'done' : runStatus === step ? 'active' : 'idle'
     case 'ingesting_docs':
-      return overrides.hasDocuments   ? 'done' : runStatus === step ? 'active' : 'idle'
+      if (overrides.hasDocuments)        return 'done'
+      if (overrides.hasDocumentsPending) return 'active'
+      return runStatus === step ? 'active' : 'idle'
     case 'extracting_rules':
       return overrides.hasRules       ? 'done' : runStatus === step ? 'active' : 'idle'
     case 'syncing_model':
@@ -86,22 +90,25 @@ function resolveStepState(
 }
 
 interface PrecheckProgressCardProps {
-  run:                   PrecheckRun | null | undefined
-  hasSiteContext?:       boolean
-  hasDocuments?:         boolean
-  hasRules?:             boolean
-  hasModelRef?:          boolean
-  hasGeometrySnapshot?:  boolean
-  isLoading?:            boolean
+  run:                    PrecheckRun | null | undefined
+  hasSiteContext?:        boolean
+  hasDocuments?:          boolean
+  /** True when docs are UI-selected but not yet ingested — shows amber spinner. */
+  hasDocumentsPending?:   boolean
+  hasRules?:              boolean
+  hasModelRef?:           boolean
+  hasGeometrySnapshot?:   boolean
+  isLoading?:             boolean
 }
 
 export function PrecheckProgressCard({
   run,
-  hasSiteContext        = false,
-  hasDocuments          = false,
-  hasRules              = false,
-  hasModelRef           = false,
-  hasGeometrySnapshot   = false,
+  hasSiteContext         = false,
+  hasDocuments           = false,
+  hasDocumentsPending    = false,
+  hasRules               = false,
+  hasModelRef            = false,
+  hasGeometrySnapshot    = false,
   isLoading,
 }: PrecheckProgressCardProps) {
   if (isLoading) {
@@ -149,7 +156,7 @@ export function PrecheckProgressCard({
 
       <div className="space-y-1.5">
         {STEPS.map(({ status, label }) => {
-          const state = resolveStepState(status, run.status, { hasSiteContext, hasDocuments, hasRules, hasModelRef, hasGeometrySnapshot })
+          const state = resolveStepState(status, run.status, { hasSiteContext, hasDocuments, hasDocumentsPending, hasRules, hasModelRef, hasGeometrySnapshot })
           return (
             <div key={status} className="flex items-center gap-2">
               <div className={cn(

@@ -1,8 +1,14 @@
 import type { z } from "zod"
 import {
   ApplicabilitySchema,
+  ApproveRuleInputSchema,
+  AssignModelRefInputSchema,
+  AssignSiteContextInputSchema,
+  CreateProjectSiteContextInputSchema,
+  DeleteProjectSiteContextInputSchema,
   ComplianceCheckSchema,
   ComplianceIssueSchema,
+  CreateManualRuleInputSchema,
   CreatePrecheckRunInputSchema,
   DeleteDocumentInputSchema,
   DeleteRunInputSchema,
@@ -16,11 +22,25 @@ import {
   IngestSiteInputSchema,
   PermitChecklistItemSchema,
   PrecheckRunSchema,
+  DeleteProjectModelInputSchema,
+  ProjectActiveModelResponseSchema,
+  ProjectDefaultSiteContextResponseSchema,
+  ProjectDocumentsResponseSchema,
+  ProjectExtractionOptionsSchema,
+  ProjectModelRefsResponseSchema,
   ProjectRunsResponseSchema,
+  ProjectSiteContextsResponseSchema,
   RegisterDocumentInputSchema,
+  RegisterProjectDocumentInputSchema,
+  RejectRuleInputSchema,
+  SetActiveProjectModelInputSchema,
+  SetDefaultSiteContextInputSchema,
+  SetProjectExtractionOptionsInputSchema,
   SiteContextSchema,
   SpeckleModelRefSchema,
+  SyncProjectModelInputSchema,
   SyncSpeckleModelInputSchema,
+  UpdateManualRuleInputSchema,
   UploadedDocumentSchema,
 } from "./schemas"
 
@@ -47,3 +67,23 @@ export type GetRunDetailsResponse = z.infer<typeof GetRunDetailsResponseSchema>
 export type ProjectRunsResponse = z.infer<typeof ProjectRunsResponseSchema>
 export type DeleteDocumentInput = z.infer<typeof DeleteDocumentInputSchema>
 export type DeleteRunInput = z.infer<typeof DeleteRunInputSchema>
+export type RegisterProjectDocumentInput = z.infer<typeof RegisterProjectDocumentInputSchema>
+export type ProjectDocumentsResponse = z.infer<typeof ProjectDocumentsResponseSchema>
+export type SyncProjectModelInput = z.infer<typeof SyncProjectModelInputSchema>
+export type ProjectModelRefsResponse = z.infer<typeof ProjectModelRefsResponseSchema>
+export type SetActiveProjectModelInput = z.infer<typeof SetActiveProjectModelInputSchema>
+export type ProjectActiveModelResponse = z.infer<typeof ProjectActiveModelResponseSchema>
+export type DeleteProjectModelInput = z.infer<typeof DeleteProjectModelInputSchema>
+export type AssignModelRefInput = z.infer<typeof AssignModelRefInputSchema>
+export type AssignSiteContextInput = z.infer<typeof AssignSiteContextInputSchema>
+export type CreateProjectSiteContextInput = z.infer<typeof CreateProjectSiteContextInputSchema>
+export type DeleteProjectSiteContextInput = z.infer<typeof DeleteProjectSiteContextInputSchema>
+export type SetDefaultSiteContextInput = z.infer<typeof SetDefaultSiteContextInputSchema>
+export type ProjectSiteContextsResponse = z.infer<typeof ProjectSiteContextsResponseSchema>
+export type ProjectDefaultSiteContextResponse = z.infer<typeof ProjectDefaultSiteContextResponseSchema>
+export type ProjectExtractionOptions = z.infer<typeof ProjectExtractionOptionsSchema>
+export type SetProjectExtractionOptionsInput = z.infer<typeof SetProjectExtractionOptionsInputSchema>
+export type ApproveRuleInput = z.infer<typeof ApproveRuleInputSchema>
+export type RejectRuleInput = z.infer<typeof RejectRuleInputSchema>
+export type CreateManualRuleInput = z.infer<typeof CreateManualRuleInputSchema>
+export type UpdateManualRuleInput = z.infer<typeof UpdateManualRuleInputSchema>

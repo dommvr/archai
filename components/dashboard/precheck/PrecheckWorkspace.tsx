@@ -14,15 +14,17 @@ import type {
   GetRunDetailsResponse,
   IngestSiteInput,
   PrecheckRun,
+  SiteContext,
   SyncSpeckleModelInput,
 } from '@/lib/precheck/types'
 import type { AuthUser } from '@/types'
 
 import { PrecheckRunsList } from './PrecheckRunsList'
 import { CreatePrecheckRunDialog } from './CreatePrecheckRunDialog'
-import { SiteContextForm } from './SiteContextForm'
+import { SiteContextPicker } from './SiteContextPicker'
 import { DocumentUploadPanel } from './DocumentUploadPanel'
 import { RuleExtractionStatusCard } from './RuleExtractionStatusCard'
+import { ManualRuleDialog } from './ManualRuleDialog'
 import { SpeckleModelPicker } from './SpeckleModelPicker'
 import { PrecheckProgressCard } from './PrecheckProgressCard'
 import { ReadinessScoreCard } from './ReadinessScoreCard'
@@ -31,15 +33,28 @@ import { ComplianceIssueDrawer } from './ComplianceIssueDrawer'
 import { PermitChecklistCard } from './PermitChecklistCard'
 import { PrecheckViewerPanel } from './PrecheckViewerPanel'
 import { ResizableVerticalSplit } from '@/components/ui/resizable-vertical-split'
+import { ResizableHorizontalSplit } from '@/components/ui/resizable-horizontal-split'
+import type { CreateManualRuleInput } from '@/lib/precheck/types'
 
 type Tab = 'setup' | 'issues' | 'checklist'
 
 interface PrecheckWorkspaceProps {
   user: AuthUser
   projectId: string | null
+  /**
+   * Optional: the project's active model ref (streamId + versionId) to pre-fill
+   * the SpeckleModelPicker when the selected run does not yet have its own modelRef.
+   * Passed down from the project Models page active model selection.
+   */
+  projectActiveModelRef?: { streamId: string; versionId: string; branchName?: string; modelName?: string } | null
+  /**
+   * Optional: the project's default site context to pre-fill SiteContextPicker
+   * when the selected run does not yet have its own site context saved.
+   */
+  projectDefaultSiteContext?: SiteContext | null
 }
 
-export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
+export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, projectDefaultSiteContext }: PrecheckWorkspaceProps) {
   const [runs, setRuns] = useState<PrecheckRun[]>([])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [runDetails, setRunDetails] = useState<GetRunDetailsResponse | null>(null)
@@ -51,6 +66,10 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
   const [loadingDetails, setLoadingDetails] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [syncingModel, setSyncingModel] = useState(false)
+  const [manualRuleOpen, setManualRuleOpen] = useState(false)
+  // Tracks docs selected in the project library but not yet ingested.
+  // Used so hasDocuments is true as soon as the user picks docs, not only after ingestion.
+  const [selectedDocCount, setSelectedDocCount] = useState(0)
 
   // Ref that always reflects the current selectedRunId without closure staleness.
   // handleSelectRun and fetchProjectRuns read this instead of the closed-over
@@ -232,7 +251,16 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
           // geometrySnapshot) stale. When the run reaches a terminal state,
           // re-fetch the full run details so the viewer can mount and
           // SpeckleModelPicker shows the synced confirmation.
-          if (patch.status === 'synced' || patch.status === 'completed' || patch.status === 'failed') {
+          // Re-fetch full run details (including joined rules, modelRef, snapshot)
+          // when the run reaches a terminal state OR returns to 'created' after
+          // extraction/ingestion. The partial patch updates run.status immediately
+          // but leaves joined data stale — a full fetch is needed to surface new rules.
+          if (
+            patch.status === 'synced' ||
+            patch.status === 'completed' ||
+            patch.status === 'failed' ||
+            patch.status === 'created'
+          ) {
             // DEBUG — remove once realtime behaviour is confirmed
             console.log('[RT:precheck] triggering fetchRunDetails for status:', patch.status)
             void fetchRunDetails(selectedRunId)
@@ -329,6 +357,33 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     }
   }
 
+  /**
+   * Assign an existing project model ref to the current run without creating a
+   * new speckle_model_refs row. Called by SpeckleModelPicker when the user picks
+   * from the project library (not when they submit new raw stream/version IDs).
+   */
+  async function handleAssignExistingModel(modelRefId: string) {
+    if (!selectedRunId) return
+    setSyncingModel(true)
+    try {
+      await precheckApi.assignModelRefToRun({ runId: selectedRunId, modelRefId })
+      await refreshRunState(selectedRunId)
+    } finally {
+      setSyncingModel(false)
+    }
+  }
+
+  /**
+   * Assign an existing project SiteContext to the current run without creating
+   * a new site_contexts row. Called by SiteContextPicker when the user picks
+   * from the project library (not when they submit new site data via the form).
+   */
+  async function handleAssignExistingSiteContext(siteContextId: string) {
+    if (!selectedRunId) return
+    await precheckApi.assignSiteContextToRun({ runId: selectedRunId, siteContextId })
+    await refreshRunState(selectedRunId)
+  }
+
   async function handleEvaluate() {
     if (!selectedRunId) return
     await precheckApi.evaluateCompliance({ runId: selectedRunId })
@@ -364,6 +419,28 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
     await fetchProjectRuns()
   }
 
+  async function handleApproveRule(ruleId: string) {
+    await precheckApi.approveRule({ ruleId })
+    if (selectedRunId) {
+      await fetchRunDetails(selectedRunId)
+    }
+  }
+
+  async function handleRejectRule(ruleId: string) {
+    await precheckApi.rejectRule({ ruleId })
+    if (selectedRunId) {
+      await fetchRunDetails(selectedRunId)
+    }
+  }
+
+  async function handleCreateManualRule(input: CreateManualRuleInput) {
+    const rule = await precheckApi.createManualRule(input)
+    if (selectedRunId) {
+      await fetchRunDetails(selectedRunId)
+    }
+    return rule
+  }
+
   function handleSelectIssue(issue: ComplianceIssue) {
     setSelectedIssue(issue)
     setDrawerOpen(true)
@@ -395,15 +472,22 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
   ]
 
   return (
-    <div className="flex h-full">
-      <div className="relative min-w-0 flex-1">
-        <PrecheckViewerPanel
-          selectedIssue={selectedIssue}
-          modelRef={currentRunDetails?.modelRef ?? null}
-        />
-      </div>
-
-      <aside className="flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-archai-graphite bg-archai-charcoal">
+    <>
+    <ResizableHorizontalSplit
+      storageKey="precheck-right-panel"
+      defaultLeftPercent={72}
+      minLeftPercent={45}
+      maxLeftPercent={88}
+      leftPanel={
+        <div className="relative h-full w-full">
+          <PrecheckViewerPanel
+            selectedIssue={selectedIssue}
+            modelRef={currentRunDetails?.modelRef ?? null}
+          />
+        </div>
+      }
+      rightPanel={
+      <aside className="flex h-full flex-col overflow-hidden bg-archai-charcoal">
         <div className="flex shrink-0 items-center justify-between border-b border-archai-graphite px-4 py-3">
           <div>
             <h2 className="text-sm font-semibold text-white">Code Checker</h2>
@@ -457,8 +541,12 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
                 <ReadinessScoreCard score={run?.readinessScore} isLoading={loadingDetails} />
                 <PrecheckProgressCard
                   run={run ?? selectedRun}
-                  hasSiteContext={currentRunDetails?.siteContext != null}
+                  hasSiteContext={
+                    currentRunDetails?.siteContext != null ||
+                    projectDefaultSiteContext != null
+                  }
                   hasDocuments={(currentRunDetails?.documents?.length ?? 0) > 0}
+                  hasDocumentsPending={selectedDocCount > 0}
                   hasRules={(currentRunDetails?.rules?.length ?? 0) > 0}
                   hasModelRef={currentRunDetails?.modelRef != null}
                   hasGeometrySnapshot={currentRunDetails?.geometrySnapshot != null}
@@ -515,26 +603,35 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
                         ) : (
                           /*
                             key={selectedRunId} forces a remount whenever the selected
-                            run changes, guaranteeing SiteContextForm's prefill effect
+                            run changes, guaranteeing SiteContextPicker's prefill effect
                             fires with the new run's data and DocumentUploadPanel's
                             pending state is cleared. Safe to mount here because
                             detailsReadyForSelectedRun already guarantees the details
                             belong to selectedRunId.
                           */
                           <>
-                            <SiteContextForm
+                            <SiteContextPicker
                               key={selectedRunId}
                               runId={selectedRunId}
-                              onSubmit={handleIngestSite}
+                              projectId={projectId ?? ''}
                               siteContext={currentRunDetails?.siteContext}
+                              // Pre-fill new-context form from project default when run has no context.
+                              projectDefaultSiteContext={
+                                currentRunDetails?.siteContext == null
+                                  ? projectDefaultSiteContext ?? undefined
+                                  : undefined
+                              }
+                              onPickExisting={handleAssignExistingSiteContext}
+                              onSubmit={handleIngestSite}
                               isLoading={false}
                             />
                             <DocumentUploadPanel
                               key={selectedRunId}
-                              runId={selectedRunId}
+                              projectId={projectId ?? ''}
                               onDocumentsReady={handleIngestDocuments}
                               existingDocuments={currentRunDetails?.documents ?? []}
                               onDeleteDocument={handleDeleteDocument}
+                              onSelectionChange={setSelectedDocCount}
                               isLoading={false}
                             />
                             <RuleExtractionStatusCard
@@ -542,13 +639,24 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
                               rules={rules}
                               canExtract
                               onExtract={handleExtractRules}
+                              onApprove={handleApproveRule}
+                              onReject={handleRejectRule}
+                              onAddManual={() => setManualRuleOpen(true)}
                               isExtracting={extracting}
                             />
                             <SpeckleModelPicker
                               key={selectedRunId}
                               runId={selectedRunId}
+                              projectId={projectId ?? ''}
                               onSync={handleSyncModel}
+                              onAssignExisting={handleAssignExistingModel}
                               modelRef={currentRunDetails?.modelRef}
+                              // Pre-fill from project active model when this run has no own ref yet.
+                              defaultModelRef={
+                                currentRunDetails?.modelRef == null
+                                  ? projectActiveModelRef ?? undefined
+                                  : undefined
+                              }
                               geometrySnapshot={currentRunDetails?.geometrySnapshot}
                               run={run}
                               isLoading={
@@ -614,6 +722,8 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
           </div>
         )}
       </aside>
+      }
+    />
 
       {projectId && (
         <CreatePrecheckRunDialog
@@ -630,6 +740,16 @@ export function PrecheckWorkspace({ user, projectId }: PrecheckWorkspaceProps) {
         open={drawerOpen}
         onOpenChange={setDrawerOpen}
       />
-    </div>
+
+      {projectId && (
+        <ManualRuleDialog
+          open={manualRuleOpen}
+          onClose={() => setManualRuleOpen(false)}
+          projectId={projectId}
+          runId={selectedRunId ?? undefined}
+          onCreate={handleCreateManualRule}
+        />
+      )}
+    </>
   )
 }

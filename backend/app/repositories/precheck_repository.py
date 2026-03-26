@@ -31,6 +31,7 @@ from app.core.schemas import (
     PermitChecklistItem,
     PrecheckRun,
     PrecheckRunStatus,
+    ProjectExtractionOptions,
     RuleStatus,
     SiteContext,
     SpeckleModelRef,
@@ -174,6 +175,91 @@ class PrecheckRepository:
         )
         return SiteContext.model_validate(result.data) if result.data else None
 
+    async def get_site_contexts_for_project(self, project_id: UUID) -> list[SiteContext]:
+        """Returns all site contexts belonging to the project, newest first."""
+        result = (
+            await self._db.table("site_contexts")
+            .select("*")
+            .eq("project_id", str(project_id))
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return [SiteContext.model_validate(r) for r in (result.data or [])]
+
+    async def get_default_site_context_for_project(
+        self, project_id: UUID
+    ) -> SiteContext | None:
+        """
+        Returns the default SiteContext for a project by reading
+        projects.default_site_context_id and joining site_contexts.
+        Returns None if no default is set or the context no longer exists.
+        """
+        project_result = (
+            await self._db.table("projects")
+            .select("default_site_context_id")
+            .eq("id", str(project_id))
+            .single()
+            .execute()
+        )
+        if not project_result.data:
+            return None
+        ctx_id = project_result.data.get("default_site_context_id")
+        if not ctx_id:
+            return None
+        ctx_result = (
+            await self._db.table("site_contexts")
+            .select("*")
+            .eq("id", str(ctx_id))
+            .single()
+            .execute()
+        )
+        if not ctx_result.data:
+            return None
+        return SiteContext.model_validate(ctx_result.data)
+
+    async def set_default_site_context(
+        self, project_id: UUID, site_context_id: UUID
+    ) -> None:
+        """Persists the default site context pointer on the project row."""
+        await (
+            self._db.table("projects")
+            .update({"default_site_context_id": str(site_context_id)})
+            .eq("id", str(project_id))
+            .execute()
+        )
+
+    async def get_default_site_context_id_for_project(
+        self, project_id: UUID
+    ) -> UUID | None:
+        """Returns the raw default_site_context_id UUID for a project, or None."""
+        result = (
+            await self._db.table("projects")
+            .select("default_site_context_id")
+            .eq("id", str(project_id))
+            .single()
+            .execute()
+        )
+        if not result.data:
+            return None
+        raw = result.data.get("default_site_context_id")
+        return UUID(raw) if raw else None
+
+    async def delete_site_context(self, site_context_id: UUID) -> None:
+        """
+        Hard-deletes a site_contexts row.
+
+        Foreign key constraints use ON DELETE SET NULL so:
+          - precheck_runs.site_context_id → automatically cleared
+          - projects.default_site_context_id → automatically cleared
+        No manual cleanup is required.
+        """
+        await (
+            self._db.table("site_contexts")
+            .delete()
+            .eq("id", str(site_context_id))
+            .execute()
+        )
+
     # ── speckle_model_refs ────────────────────────────────────
 
     async def create_speckle_model_ref(self, row: dict[str, Any]) -> SpeckleModelRef:
@@ -190,6 +276,131 @@ class PrecheckRepository:
         )
         return SpeckleModelRef.model_validate(result.data) if result.data else None
 
+    async def list_model_refs_for_project(
+        self, project_id: UUID
+    ) -> list[SpeckleModelRef]:
+        """Returns all Speckle model refs for a project, newest first."""
+        result = (
+            await self._db.table("speckle_model_refs")
+            .select("*")
+            .eq("project_id", str(project_id))
+            .order("selected_at", desc=True)
+            .execute()
+        )
+        return [SpeckleModelRef.model_validate(r) for r in (result.data or [])]
+
+    async def get_active_model_ref_for_project(
+        self, project_id: UUID
+    ) -> SpeckleModelRef | None:
+        """
+        Returns the active SpeckleModelRef for a project by reading
+        projects.active_model_ref_id and joining speckle_model_refs.
+        Returns None if no active model is set or the ref no longer exists.
+        """
+        project_result = (
+            await self._db.table("projects")
+            .select("active_model_ref_id")
+            .eq("id", str(project_id))
+            .single()
+            .execute()
+        )
+        if not project_result.data:
+            return None
+        ref_id = project_result.data.get("active_model_ref_id")
+        if not ref_id:
+            return None
+        ref_result = (
+            await self._db.table("speckle_model_refs")
+            .select("*")
+            .eq("id", str(ref_id))
+            .single()
+            .execute()
+        )
+        if not ref_result.data:
+            return None
+        return SpeckleModelRef.model_validate(ref_result.data)
+
+    async def set_active_model_ref(
+        self, project_id: UUID, model_ref_id: UUID
+    ) -> None:
+        """Persists the active SpeckleModelRef pointer on the project row."""
+        await (
+            self._db.table("projects")
+            .update({"active_model_ref_id": str(model_ref_id)})
+            .eq("id", str(project_id))
+            .execute()
+        )
+
+    async def clear_active_model_ref_if_matches(
+        self, project_id: UUID, model_ref_id: UUID
+    ) -> None:
+        """
+        If the project's active_model_ref_id matches model_ref_id, set it to NULL.
+        Called before deleting a model ref to prevent a dangling FK.
+        """
+        await (
+            self._db.table("projects")
+            .update({"active_model_ref_id": None})
+            .eq("id", str(project_id))
+            .eq("active_model_ref_id", str(model_ref_id))
+            .execute()
+        )
+
+    async def delete_model_ref(self, model_ref_id: UUID) -> None:
+        """Deletes a SpeckleModelRef row. Caller must clear FK references first."""
+        await (
+            self._db.table("speckle_model_refs")
+            .delete()
+            .eq("id", str(model_ref_id))
+            .execute()
+        )
+
+    async def get_model_ref(self, model_ref_id: UUID) -> SpeckleModelRef | None:
+        """Fetches a single SpeckleModelRef by ID."""
+        result = (
+            await self._db.table("speckle_model_refs")
+            .select("*")
+            .eq("id", str(model_ref_id))
+            .maybe_single()
+            .execute()
+        )
+        if not result.data:
+            return None
+        return SpeckleModelRef.model_validate(result.data)
+
+    async def get_model_ref_by_stream_version(
+        self, project_id: UUID, stream_id: str, version_id: str
+    ) -> SpeckleModelRef | None:
+        """
+        Returns an existing SpeckleModelRef for (project_id, stream_id, version_id),
+        or None if no matching row exists.
+
+        Used by sync routes to prevent duplicate rows when the same Speckle
+        stream version is registered more than once for a project.
+        """
+        result = (
+            await self._db.table("speckle_model_refs")
+            .select("*")
+            .eq("project_id", str(project_id))
+            .eq("stream_id", stream_id)
+            .eq("version_id", version_id)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return SpeckleModelRef.model_validate(rows[0]) if rows else None
+
+    async def set_model_ref_synced_at(
+        self, model_ref_id: UUID, synced_at: datetime
+    ) -> None:
+        """Stamps synced_at on a SpeckleModelRef after successful geometry derivation."""
+        await (
+            self._db.table("speckle_model_refs")
+            .update({"synced_at": synced_at.isoformat()})
+            .eq("id", str(model_ref_id))
+            .execute()
+        )
+
     # ── uploaded_documents ────────────────────────────────────
 
     async def get_documents_for_run(self, run_id: UUID) -> list[UploadedDocument]:
@@ -197,6 +408,17 @@ class PrecheckRepository:
             await self._db.table("uploaded_documents")
             .select("*")
             .eq("run_id", str(run_id))
+            .execute()
+        )
+        return [UploadedDocument.model_validate(r) for r in (result.data or [])]
+
+    async def get_documents_for_project(self, project_id: UUID) -> list[UploadedDocument]:
+        """Returns all documents for a project regardless of run association, newest first."""
+        result = (
+            await self._db.table("uploaded_documents")
+            .select("*")
+            .eq("project_id", str(project_id))
+            .order("uploaded_at", desc=True)
             .execute()
         )
         return [UploadedDocument.model_validate(r) for r in (result.data or [])]
@@ -210,6 +432,28 @@ class PrecheckRepository:
             .execute()
         )
         return [UploadedDocument.model_validate(r) for r in (result.data or [])]
+
+    async def associate_documents_to_run(
+        self, run_id: UUID, document_ids: list[UUID]
+    ) -> None:
+        """
+        Stamps run_id on uploaded_documents rows that currently have no run association
+        (run_id IS NULL). Rows already associated to a run are intentionally left unchanged
+        — they may belong to a different run's ingestion history.
+
+        Called by the ingest-documents route so that extract_rules_from_chunks
+        can find these documents via get_documents_for_run().
+        """
+        if not document_ids:
+            return
+        ids = [str(d) for d in document_ids]
+        await (
+            self._db.table("uploaded_documents")
+            .update({"run_id": str(run_id)})
+            .in_("id", ids)
+            .is_("run_id", "null")
+            .execute()
+        )
 
     async def create_uploaded_document(self, row: dict[str, Any]) -> UploadedDocument:
         result = await self._db.table("uploaded_documents").insert(row).execute()
@@ -360,6 +604,86 @@ class PrecheckRepository:
         rows = result.data or []
         return GeometrySnapshot.model_validate(rows[0]) if rows else None
 
+    async def get_snapshot_for_model_ref(
+        self, model_ref_id: UUID
+    ) -> GeometrySnapshot | None:
+        """Return the most recent geometry snapshot for a project-level model ref."""
+        result = (
+            await self._db.table("geometry_snapshots")
+            .select("*")
+            .eq("speckle_model_ref_id", str(model_ref_id))
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return GeometrySnapshot.model_validate(rows[0]) if rows else None
+
+    async def delete_snapshots_for_model_ref(self, model_ref_id: UUID) -> None:
+        """Remove all project-level snapshots for a model ref (run_id IS NULL)."""
+        await (
+            self._db.table("geometry_snapshots")
+            .delete()
+            .eq("speckle_model_ref_id", str(model_ref_id))
+            .is_("run_id", "null")
+            .execute()
+        )
+
+    async def delete_all_snapshots_for_model_ref(self, model_ref_id: UUID) -> None:
+        """
+        Remove ALL geometry snapshots that reference this model ref —
+        both project-level (run_id IS NULL) and run-scoped.
+
+        Called before deleting a speckle_model_refs row to satisfy the
+        ON DELETE RESTRICT FK on geometry_snapshots.speckle_model_ref_id.
+
+        Geometry snapshots are derived data (re-derivable from Speckle),
+        so hard-deleting them is safe.  The precheck_runs rows that pointed
+        to this model ref are preserved; their speckle_model_ref_id becomes
+        NULL via ON DELETE SET NULL at the DB level.
+        """
+        await (
+            self._db.table("geometry_snapshots")
+            .delete()
+            .eq("speckle_model_ref_id", str(model_ref_id))
+            .execute()
+        )
+
+    async def copy_model_snapshot_to_run(
+        self, model_ref_id: UUID, run_id: UUID
+    ) -> GeometrySnapshot | None:
+        """
+        Copy the latest project-level snapshot (run_id IS NULL) for a model ref
+        into a new run-scoped snapshot so Tool 1 can display metrics immediately
+        after a user assigns an existing project model to a run.
+
+        Returns the new run-scoped snapshot, or None if no source snapshot exists.
+        """
+        source = await self.get_snapshot_for_model_ref(model_ref_id)
+        if source is None:
+            return None
+
+        # Delete any existing run-scoped snapshot so we don't accumulate duplicates
+        await self._db.table("geometry_snapshots").delete().eq(
+            "run_id", str(run_id)
+        ).execute()
+
+        now = datetime.now(timezone.utc).isoformat()
+        row = {
+            "id":                   str(uuid4()),
+            "project_id":           str(source.project_id),
+            "run_id":               str(run_id),
+            "speckle_model_ref_id": str(model_ref_id),
+            "site_boundary":        None,
+            "building_footprints":  source.building_footprints,
+            "floors":               source.floors,
+            "metrics":              [m.model_dump() for m in source.metrics],
+            "raw_metrics":          source.raw_metrics,
+            "created_at":           now,
+        }
+        result = await self._db.table("geometry_snapshots").insert(row).execute()
+        return GeometrySnapshot.model_validate(result.data[0])
+
     # ── compliance_checks ─────────────────────────────────────
 
     async def create_checks_bulk(self, rows: list[dict[str, Any]]) -> list[ComplianceCheck]:
@@ -463,3 +787,170 @@ class PrecheckRepository:
             .eq("id", str(run_id))
             .execute()
         )
+
+    # ── extracted_rules (v2 additions) ────────────────────────
+
+    async def get_rule_by_id(self, rule_id: UUID) -> ExtractedRule | None:
+        result = (
+            await self._db.table("extracted_rules")
+            .select("*")
+            .eq("id", str(rule_id))
+            .maybe_single()
+            .execute()
+        )
+        return ExtractedRule.model_validate(result.data) if result.data else None
+
+    async def get_rules_for_project(
+        self, project_id: UUID
+    ) -> list[ExtractedRule]:
+        """
+        Returns all non-rejected rules for a project regardless of run.
+        Used by compliance engine and rule management panel.
+        """
+        result = (
+            await self._db.table("extracted_rules")
+            .select("*")
+            .eq("project_id", str(project_id))
+            .neq("status", RuleStatus.REJECTED.value)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return [ExtractedRule.model_validate(r) for r in (result.data or [])]
+
+    async def update_rule(
+        self, rule_id: UUID, patch: dict[str, Any]
+    ) -> ExtractedRule:
+        """
+        Applies a partial patch to an extracted_rules row.
+        Caller is responsible for providing only valid column names.
+        """
+        result = (
+            await self._db.table("extracted_rules")
+            .update(_to_json_safe(patch))
+            .eq("id", str(rule_id))
+            .execute()
+        )
+        return ExtractedRule.model_validate(result.data[0])
+
+    async def get_rules_in_conflict_group(
+        self, conflict_group_id: UUID
+    ) -> list[ExtractedRule]:
+        """Returns all rules sharing a conflict_group_id."""
+        result = (
+            await self._db.table("extracted_rules")
+            .select("*")
+            .eq("conflict_group_id", str(conflict_group_id))
+            .neq("status", RuleStatus.REJECTED.value)
+            .execute()
+        )
+        return [ExtractedRule.model_validate(r) for r in (result.data or [])]
+
+    async def get_authoritative_rules_for_run(
+        self, run_id: UUID
+    ) -> list[ExtractedRule]:
+        """
+        Returns only authoritative rules for the run's documents.
+        Authority hierarchy (checked in the compliance engine):
+          1. manual rules (is_authoritative=True by creation)
+          2. approved rules (status in {approved, reviewed})
+          3. auto_approved rules (when project option permits)
+        """
+        docs = await self.get_documents_for_run(run_id)
+        if not docs:
+            return []
+        doc_ids = [str(d.id) for d in docs]
+
+        result = (
+            await self._db.table("extracted_rules")
+            .select("*")
+            .in_("document_id", doc_ids)
+            .eq("is_authoritative", True)
+            .neq("status", RuleStatus.REJECTED.value)
+            .execute()
+        )
+        extracted = [
+            ExtractedRule.model_validate(r) for r in (result.data or [])
+        ]
+
+        # Also fetch manual rules for this project (no document_id)
+        project_result = (
+            await self._db.table("extracted_rules")
+            .select("*")
+            .eq("project_id", str(
+                (await self.get_run(run_id)).project_id  # type: ignore[union-attr]
+            ))
+            .eq("source_kind", "manual")
+            .eq("is_authoritative", True)
+            .neq("status", RuleStatus.REJECTED.value)
+            .execute()
+        )
+        manual = [
+            ExtractedRule.model_validate(r)
+            for r in (project_result.data or [])
+        ]
+
+        seen: set[str] = set()
+        combined: list[ExtractedRule] = []
+        for rule in extracted + manual:
+            if str(rule.id) not in seen:
+                seen.add(str(rule.id))
+                combined.append(rule)
+        return combined
+
+    async def create_manual_rule(
+        self, row: dict[str, Any]
+    ) -> ExtractedRule:
+        """Inserts a user-authored manual rule row."""
+        safe = _to_json_safe(row)
+        result = await self._db.table("extracted_rules").insert(safe).execute()
+        return ExtractedRule.model_validate(result.data[0])
+
+    async def clear_conflict_group_recommendations(
+        self, conflict_group_id: UUID
+    ) -> None:
+        """
+        Resets is_recommended=False for all rules in a conflict group
+        before setting a new recommended winner.
+        """
+        await (
+            self._db.table("extracted_rules")
+            .update({"is_recommended": False})
+            .eq("conflict_group_id", str(conflict_group_id))
+            .execute()
+        )
+
+    # ── project_extraction_options ─────────────────────────────
+
+    async def get_extraction_options(
+        self, project_id: UUID
+    ) -> ProjectExtractionOptions | None:
+        result = (
+            await self._db.table("project_extraction_options")
+            .select("*")
+            .eq("project_id", str(project_id))
+            .maybe_single()
+            .execute()
+        )
+        if not result.data:
+            return None
+        return ProjectExtractionOptions.model_validate(result.data)
+
+    async def upsert_extraction_options(
+        self, project_id: UUID, patch: dict[str, Any]
+    ) -> ProjectExtractionOptions:
+        """
+        Creates or updates the extraction options row for a project.
+        On insert, defaults from the DB schema apply for unset fields.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        row = {
+            "project_id": str(project_id),
+            "updated_at": now,
+            **{k: v for k, v in patch.items() if v is not None},
+        }
+        result = (
+            await self._db.table("project_extraction_options")
+            .upsert(row, on_conflict="project_id")
+            .execute()
+        )
+        return ProjectExtractionOptions.model_validate(result.data[0])
