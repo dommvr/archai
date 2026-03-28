@@ -131,6 +131,101 @@ export interface SignupFormData {
 }
 
 /**
+ * Data extracted from a Speckle TreeNode on ObjectClicked.
+ * raw mirrors NodeData.raw (typed { [prop: string]: any } in @speckle/viewer) but
+ * cast to Record<string, unknown> to keep strict mode clean.
+ */
+export interface ViewerSelectedObject {
+  /** Speckle object ID — the string passed to highlightObjects() etc. */
+  id: string
+  /** Raw Speckle object properties from node.model.raw. */
+  raw: Record<string, unknown>
+}
+
+// ── Copilot types ────────────────────────────────────────────
+
+export type CopilotMessageRole = 'user' | 'assistant' | 'tool' | 'system'
+export type CopilotAttachmentType = 'image' | 'document' | 'screenshot'
+
+/** A persisted copilot thread (one conversation within a project). */
+export interface CopilotThread {
+  id: string
+  projectId: string
+  userId: string
+  /** Auto-generated from first message or manually set. */
+  title: string | null
+  /** Run that was active when the thread was created. */
+  activeRunId: string | null
+  /** The page/route the user was on when this thread started. */
+  pageContext: string | null
+  archived: boolean
+  createdAt: string
+  updatedAt: string
+  /** Injected client-side: most recent message preview for the thread list. */
+  lastMessagePreview?: string | null
+}
+
+/** A persisted copilot message. */
+export interface CopilotMessage {
+  id: string
+  threadId: string
+  projectId: string
+  role: CopilotMessageRole
+  content: string
+  /** Set for role='tool' or when the assistant requested a tool call. */
+  toolName?: string | null
+  /** Links a tool result back to the assistant tool_call it satisfies. */
+  toolCallId?: string | null
+  /** Raw tool call/result payload (JSONB). */
+  toolPayload?: Record<string, unknown> | null
+  /** UI snapshot at send time (currentPage, activeRunId, selectedObjectIds). */
+  uiContext?: CopilotUiContext | null
+  createdAt: string
+}
+
+/** Context snapshot captured from the frontend at message send time. */
+export interface CopilotUiContext {
+  currentPage?: string
+  activeRunId?: string | null
+  selectedObjectIds?: string[]
+  selectedIssueId?: string | null
+  /** The speckle_model_refs.id currently displayed in the Speckle viewer. */
+  activeModelRefId?: string | null
+}
+
+/** Attachment metadata row. Binary lives in Supabase Storage. */
+export interface CopilotAttachment {
+  id: string
+  threadId: string
+  messageId: string | null
+  projectId: string
+  userId: string
+  attachmentType: CopilotAttachmentType
+  filename: string
+  mimeType: string | null
+  storagePath: string
+  fileSizeBytes: number | null
+  /** Rich metadata: page, run, selected objects, etc. */
+  contextMetadata: Record<string, unknown> | null
+  createdAt: string
+}
+
+/** Payload sent from the frontend when the user submits a message. */
+export interface CopilotSendMessagePayload {
+  content: string
+  uiContext?: CopilotUiContext
+  attachmentIds?: string[]
+}
+
+/** Response shape from POST /api/copilot/threads/[id]/messages */
+export interface CopilotSendMessageResponse {
+  userMessage: CopilotMessage
+  assistantMessage: CopilotMessage
+  /** Tool execution steps produced during this turn, in execution order. */
+  toolMessages?: CopilotMessage[]
+}
+
+/**
  * Minimal user profile record stored in public.user_profiles.
  * Mirrors the database schema — nullable optional fields match DB defaults.
  */

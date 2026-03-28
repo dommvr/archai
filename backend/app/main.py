@@ -1,5 +1,5 @@
 """
-ArchAI FastAPI backend — Tool 1: Smart Zoning & Code Checker + Permit Pre-Check
+ArchAI FastAPI backend — Tool 1: Smart Zoning & Code Checker + Copilot
 """
 
 import logging
@@ -11,6 +11,7 @@ from supabase._async.client import AsyncClient, create_client
 
 from app.core.config import settings
 from app.api.routes.precheck import router as precheck_router, project_router
+from app.copilot.router import router as copilot_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,15 +41,20 @@ async def lifespan(app: FastAPI):
     logger.info("ArchAI backend shutting down")
 
 
+_debug = settings.log_level.lower() == "debug"
+
 app = FastAPI(
     title="ArchAI API",
-    description="Backend services for the ArchAI platform — Tool 1: Permit Pre-Check",
+    description=(
+        "Backend services for the ArchAI platform — "
+        "Tool 1: Permit Pre-Check + Copilot"
+    ),
     version="0.1.0",
     lifespan=lifespan,
     # Docs only enabled when LOG_LEVEL=debug (proxy for development mode).
     # Set LOG_LEVEL=info in production and the Swagger/ReDoc UIs disappear.
-    docs_url="/docs" if settings.log_level.lower() == "debug" else None,
-    redoc_url="/redoc" if settings.log_level.lower() == "debug" else None,
+    docs_url="/docs" if _debug else None,
+    redoc_url="/redoc" if _debug else None,
 )
 
 # ---------------------------------------------------------------------------
@@ -66,14 +72,16 @@ app.add_middleware(
 
 # ---------------------------------------------------------------------------
 # Routers
-# precheck_router  → /precheck/...   (run-scoped operations)
-# project_router   → /projects/...   (project-scoped list operations)
+# precheck_router  → /precheck/...    (run-scoped Tool 1 operations)
+# project_router   → /projects/...    (project-scoped list operations)
+# copilot_router   → /copilot/...     (Copilot threads + messages)
 # ---------------------------------------------------------------------------
 app.include_router(precheck_router)
 app.include_router(project_router)
+app.include_router(copilot_router)
 
 
 @app.get("/health", tags=["infra"])
 async def health_check():
-    """Lightweight liveness probe for container orchestration / uptime monitors."""
+    """Liveness probe for container orchestration / uptime monitors."""
     return {"status": "ok", "version": app.version}

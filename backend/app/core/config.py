@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     classification_model: str = "gpt-5.4-mini"
     rule_extraction_confidence_threshold: float = 0.6
 
+    # ── Copilot storage ───────────────────────────────────────
+    # Supabase Storage bucket for Copilot file/screenshot attachments.
+    # Create bucket "copilot-attachments" in Supabase Storage dashboard
+    # with RLS enabled before using the attachment upload flow.
+    copilot_attachments_bucket: str = "copilot-attachments"
+
     # ── Speckle ───────────────────────────────────────────────
     # TODO: set when Speckle integration is active
     speckle_server_url: str = "https://app.speckle.systems"

@@ -1,11 +1,14 @@
 'use client'
 
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useState, useCallback } from 'react'
 import { Loader2, AlertTriangle } from 'lucide-react'
 import { FloatingToolbar } from './FloatingToolbar'
 import { ViewerAnnotationController } from './precheck/ViewerAnnotationController'
+import { ViewerInspectorPanel } from './ViewerInspectorPanel'
+import { ViewerLegend, type ViewerHighlightMode } from './ViewerLegend'
 import { cn } from '@/lib/utils'
 import type { ComplianceIssue, SpeckleModelRef } from '@/lib/precheck/types'
+import type { ViewerSelectedObject } from '@/types'
 
 /**
  * Resolves a Speckle commit/version ID to its referencedObject hash via
@@ -62,6 +65,11 @@ interface SpeckleViewerProps {
   selectedIssue: ComplianceIssue | null
   /** When set, the Speckle viewer mounts and loads this model. */
   modelRef: SpeckleModelRef | null
+  /**
+   * Optional callback fired whenever the user clicks an object in the viewer.
+   * Receives null when clicking empty space (deselect).
+   */
+  onObjectClick?: (obj: ViewerSelectedObject | null) => void
 }
 
 /**
@@ -81,12 +89,45 @@ interface SpeckleViewerProps {
  *
  * SPECKLE VIEWER WILL BE MOUNTED HERE
  */
-export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
+export function SpeckleViewer({ selectedIssue, modelRef, onObjectClick }: SpeckleViewerProps) {
   const viewerContainerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const viewerInstanceRef = useRef<any>(null)
   const [viewerState, setViewerState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [viewerError, setViewerError] = useState<string | null>(null)
+  const [selectedObject, setSelectedObject] = useState<ViewerSelectedObject | null>(null)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+
+  // Stable callback ref so the ObjectClicked handler closure always has the latest version.
+  const onObjectClickRef = useRef(onObjectClick)
+  useEffect(() => { onObjectClickRef.current = onObjectClick }, [onObjectClick])
+
+  // Measure-active ref: used inside the ObjectClicked closure (which is captured at mount time)
+  // to skip normal selection while measurement is active.
+  // Synced from FloatingToolbar via onMeasureChange callback.
+  const measureActiveRef = useRef(false)
+
+  const handleMeasureChange = useCallback((active: boolean) => {
+    measureActiveRef.current = active
+    // When exiting measure mode, clear any lingering selection state so the legend resets.
+    if (!active) {
+      setSelectedObject(null)
+    }
+  }, [])
+
+  const handleToggleProperties = useCallback(() => {
+    setInspectorOpen((prev) => {
+      const next = !prev
+      // When closing the inspector, clear the viewer selection highlight too
+      if (!next) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const v = (window as any).__speckleViewer
+        void v?.resetSelection?.()
+        setSelectedObject(null)
+      }
+      return next
+    })
+  }, [])
 
   const speckleServerUrl = process.env.NEXT_PUBLIC_SPECKLE_SERVER_URL
   const speckleToken     = process.env.NEXT_PUBLIC_SPECKLE_TOKEN ?? ''
@@ -106,6 +147,8 @@ export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
       ;(window as any).__speckleViewer = null
       setViewerState('idle')
       setViewerError(null)
+      setSelectedObject(null)
+      setInspectorOpen(false)
       return
     }
 
@@ -119,7 +162,7 @@ export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
         // Dynamic import keeps the heavy renderer out of the SSR bundle.
         // LegacyViewer extends Viewer and bundles CameraController, SelectionExtension,
         // filtering, and highlight extensions — required for highlightObjects() API.
-        const { LegacyViewer, DefaultViewerParams, SpeckleLoader } =
+        const { LegacyViewer, DefaultViewerParams, SpeckleLoader, ViewerEvent } =
           await import('@speckle/viewer')
 
         if (cancelled || !viewerContainerRef.current) return
@@ -138,6 +181,12 @@ export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
           ...DefaultViewerParams,
           showStats: false,
           verbose: false,
+          // Restrict keyboard events to the canvas element so that typing in the
+          // Copilot composer (or any other text input) does not trigger viewer
+          // keyboard controls (orbit, fly, etc.).
+          // With this flag, camera keyboard shortcuts only fire when the viewer
+          // canvas has pointer/focus — which is the correct interaction model.
+          restrictInputToCanvas: true,
         })
         await viewer.init()
         if (cancelled) { viewer.dispose?.(); return }
@@ -203,6 +252,44 @@ export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
           ;(window as any).__speckleViewer = null
           return
         }
+
+        // Wire object click → selection highlight + inspector state.
+        //
+        // Measure mode guard: when measureActiveRef.current is true, MeasurementsExtension
+        // owns pointer interactions. We must NOT call selectObjects in that case, otherwise
+        // selection overwrites the measurement visual state and makes measurement non-functional.
+        // We also do not open the inspector during measurement.
+        //
+        // SelectionEvent.hits[0].node.model carries { id: string; raw: { [k]: any } }.
+        // Cast raw to Record<string, unknown> to keep strict mode clean without widening to any.
+        viewer.on(ViewerEvent.ObjectClicked, (selectionEvent) => {
+          // Do not intercept clicks while measurement mode is active —
+          // MeasurementsExtension handles pointer events for point picking.
+          if (measureActiveRef.current) return
+
+          if (!selectionEvent || selectionEvent.hits.length === 0) {
+            // Empty-space click → clear selection both visually and in state
+            void viewer.resetSelection()
+            setSelectedObject(null)
+            onObjectClickRef.current?.(null)
+            return
+          }
+          const firstHit = selectionEvent.hits[0]
+          const id: string = firstHit.node.model.id
+          // NodeData.raw is typed { [prop: string]: any } — narrow to Record<string, unknown>
+          const raw = firstHit.node.model.raw as Record<string, unknown>
+          const obj: ViewerSelectedObject = { id, raw }
+
+          // Visually select the object via the filtering/selection layer.
+          // selectObjects() highlights the chosen object using the viewer's
+          // SelectionExtension material (blue outline by default in LegacyViewer).
+          void viewer.selectObjects([id])
+
+          setSelectedObject(obj)
+          setInspectorOpen(true)
+          onObjectClickRef.current?.(obj)
+        })
+
         setViewerState('ready')
       } catch (err) {
         if (cancelled) return
@@ -227,6 +314,23 @@ export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelRef?.streamId, modelRef?.versionId, speckleServerUrl])
 
+  // Relay container resize events to the Speckle viewer so the WebGL canvas
+  // redraws at the correct dimensions after a panel drag or layout change.
+  // Without this, viewer.init() bakes the canvas size at mount time and the
+  // canvas never updates when the container shrinks/grows via the split handle.
+  useEffect(() => {
+    const container = viewerContainerRef.current
+    if (!container) return
+
+    const observer = new ResizeObserver(() => {
+      if (viewerInstanceRef.current) {
+        try { viewerInstanceRef.current.resize() } catch { /* ignore */ }
+      }
+    })
+    observer.observe(container)
+    return () => { observer.disconnect() }
+  }, [])
+
   useEffect(() => {
     return () => {
       if (viewerInstanceRef.current) {
@@ -239,6 +343,13 @@ export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
   }, [])
 
   const isReady = viewerState === 'ready'
+
+  // Legend shows 'selection' only while the inspector is open AND an object is selected.
+  // This prevents the legend getting stuck in 'selection' state after the panel is closed.
+  const highlightMode: ViewerHighlightMode =
+    selectedIssue                           ? 'issue'
+    : (inspectorOpen && selectedObject)     ? 'selection'
+    : 'none'
 
   return (
     <div className="relative h-full w-full bg-archai-black overflow-hidden">
@@ -303,8 +414,29 @@ export function SpeckleViewer({ selectedIssue, modelRef }: SpeckleViewerProps) {
       {/* Issue-to-object highlight bridge */}
       <ViewerAnnotationController selectedIssue={selectedIssue} />
 
-      {/* Measure / comment / undo toolbar */}
-      <FloatingToolbar />
+      {/* Object properties inspector — slides in when an object is selected */}
+      <ViewerInspectorPanel
+        selectedObject={inspectorOpen ? selectedObject : null}
+        modelRef={modelRef}
+        onClose={() => {
+          // Close panel and clear viewer selection highlight
+          setInspectorOpen(false)
+          setSelectedObject(null)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const v = (window as any).__speckleViewer
+          void v?.resetSelection?.()
+        }}
+      />
+
+      {/* Color legend for current highlight mode */}
+      <ViewerLegend highlightMode={highlightMode} />
+
+      {/* Viewer toolbar — real camera, section, measure, and visibility controls */}
+      <FloatingToolbar
+        onToggleProperties={handleToggleProperties}
+        propertiesOpen={inspectorOpen}
+        onMeasureChange={handleMeasureChange}
+      />
     </div>
   )
 }

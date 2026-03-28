@@ -830,46 +830,198 @@ def _parse_llm_item(
         return None
 
 
+# ── Utility-service condition normalisation ────────────────────────────────────
+#
+# Dimensional-standards tables in many US zoning codes repeat each row for
+# different utility-service tiers ("Central water or sewer", "Municipal water &
+# sewer", "No central water or sewer", etc.).  These are variant spellings of
+# two canonical infrastructure scopes.  Treating them as literally different
+# conditions produces spurious separate buckets that prevent deduplication and
+# conflict detection.
+#
+# This table maps every known surface form (lower-cased, whitespace-collapsed)
+# to a stable canonical token used ONLY as the conflict-key component.
+# The original condition_text is preserved on the rule itself.
+#
+# Keep this finite and exact — do NOT use fuzzy matching here.
+_UTILITY_COND_NORM: dict[str, str] = {
+    "central water or sewer":    "utility:central",
+    "central water & sewer":     "utility:central",
+    "central water and sewer":   "utility:central",
+    "municipal water & sewer":   "utility:central",
+    "municipal water and sewer": "utility:central",
+    "no central water or sewer": "utility:no_central",
+    "no central water & sewer":  "utility:no_central",
+    "no central water and sewer": "utility:no_central",
+    "without central water or sewer": "utility:no_central",
+}
+
+
+def _normalise_conflict_condition(raw: str | None) -> str:
+    """
+    Returns a stable conflict-key token for a condition_text string.
+
+    Applies the utility-service normalisation table so that variant spellings
+    of the same infrastructure scope collapse to the same token.  All other
+    conditions are returned as whitespace-collapsed lowercase.
+    """
+    norm = " ".join((raw or "").lower().split())
+    return _UTILITY_COND_NORM.get(norm, norm)
+
+
+def _deduplicate_rules(rules: list[ExtractedRule]) -> list[ExtractedRule]:
+    """
+    Marks exact-duplicate rules as superseded, keeping the highest-confidence
+    copy.  Returns the same list with status mutations applied in place.
+
+    "Exact duplicate" means same metric + same normalised condition (after
+    utility normalisation) + same units + same value + same operator.  These
+    arise when the same row in a dimensional-standards table is extracted from
+    multiple overlapping chunks.
+
+    Source-chunk guard: when the condition is blank AND the metric is
+    parking_spaces_required, only deduplicate pairs that share the same
+    source_chunk_id.  Parking rules with blank conditions are often genuinely
+    distinct use-type requirements where the LLM dropped the context — they
+    look like duplicates by value alone but come from different clauses in
+    different chunks.  The guard prevents false-dedup suppression of valid
+    rules while still collapsing true repeats that the same chunk emits.
+
+    Non-parking metrics (setbacks, height, lot coverage) are exempt from the
+    guard because their blank-condition rows are always from the same
+    dimensional-standards table and are genuine duplicates even across chunks.
+
+    Deduplication runs BEFORE conflict detection so that conflict groups are
+    formed only from semantically distinct alternatives, not re-extractions.
+    """
+    # Group by dedup key
+    DedupKey = tuple[MetricKey, str, str, float | None, float | None, float | None, str]
+
+    def dedup_key(r: ExtractedRule) -> DedupKey:
+        norm_cond  = _normalise_conflict_condition(r.condition_text)
+        norm_units = " ".join((r.units or "").lower().split())
+        # Round values to 3 dp to absorb floating-point noise from unit conversion
+        val   = round(r.value_number or 0.0, 3) if r.value_number is not None else None
+        vmin  = round(r.value_min    or 0.0, 3) if r.value_min    is not None else None
+        vmax  = round(r.value_max    or 0.0, 3) if r.value_max    is not None else None
+        op    = r.operator.value
+        return (r.metric_key, norm_cond, norm_units, val, vmin, vmax, op)
+
+    _BLANK_COND_CHUNK_GUARD_METRICS: frozenset[MetricKey] = frozenset({
+        MetricKey.PARKING_SPACES_REQUIRED,
+        MetricKey.PARKING_SPACES_PROVIDED,
+    })
+
+    by_dedup: dict[DedupKey, list[ExtractedRule]] = {}
+    for rule in rules:
+        if rule.status in {RuleStatus.REJECTED}:
+            continue  # never supersede a manually-rejected rule
+        by_dedup.setdefault(dedup_key(rule), []).append(rule)
+
+    for candidates in by_dedup.values():
+        if len(candidates) < 2:
+            continue
+
+        # Source-chunk guard: for parking rules with blank condition, only
+        # deduplicate candidates from the same chunk.  Split by chunk first.
+        first = candidates[0]
+        norm_cond_first = _normalise_conflict_condition(first.condition_text)
+        if (
+            first.metric_key in _BLANK_COND_CHUNK_GUARD_METRICS
+            and norm_cond_first == ""
+        ):
+            # Sub-group by source_chunk_id; dedup only within each chunk
+            by_chunk: dict[str, list[ExtractedRule]] = {}
+            for r in candidates:
+                chunk_key = str(r.source_chunk_id) if r.source_chunk_id else "_no_chunk"
+                by_chunk.setdefault(chunk_key, []).append(r)
+            chunk_groups = list(by_chunk.values())
+        else:
+            # All candidates form a single dedup group
+            chunk_groups = [candidates]
+
+        for group in chunk_groups:
+            if len(group) < 2:
+                continue
+            # Keep highest-confidence rule; supersede the rest.
+            group.sort(key=lambda r: r.confidence, reverse=True)
+            keeper = group[0]
+            for dup in group[1:]:
+                if dup.status == RuleStatus.DRAFT:
+                    dup.status = RuleStatus.SUPERSEDED
+                    log.debug(
+                        "Dedup: superseded rule=%s (conf=%.2f) — duplicate of keeper=%s (conf=%.2f) "
+                        "metric=%s cond=%r units=%r val=%s chunk=%s",
+                        dup.id, dup.confidence,
+                        keeper.id, keeper.confidence,
+                        dup.metric_key.value,
+                        dup.condition_text, dup.units,
+                        dup.value_number,
+                        dup.source_chunk_id,
+                    )
+
+    return rules
+
+
 def detect_conflicts(rules: list[ExtractedRule]) -> list[ExtractedRule]:
     """
     Groups rules that represent the same constraint with conflicting values.
 
-    Conflict criteria:
+    Pipeline:
+      1. Deduplicate — same constraint re-extracted from multiple chunks gets
+         collapsed to one keeper (highest confidence); duplicates are superseded.
+      2. Conflict detection — among surviving rules, same metric + same
+         normalised condition (incl. utility-service normalisation) + same units
+         + different value → genuine conflict group.
+
+    Conflict criteria (ALL must be true):
       - Same metric_key
+      - Same normalised condition_text (utility-service variants unified, e.g.
+        "Central water & sewer" == "Municipal water & sewer" == "utility:central")
+      - Same normalised units (calculation basis)
       - Same or overlapping applicability scope (or both empty)
       - Differing value_number / value_min / value_max OR differing operator
 
     When conflicts are detected, assigns a shared conflict_group_id UUID and
     flags the recommended winner using _pick_conflict_winner().
 
-    Returns the same list with conflict fields mutated in place.
+    Returns the same list with conflict fields and status mutated in place.
 
     NOTE: This operates on in-memory ExtractedRule objects before DB insertion.
-    For rules added later (e.g. manual rules), re-run conflict detection
-    by calling this on the full project rule set and persisting the results.
     """
-    # Group candidates by metric_key for O(n log n) comparison
-    by_metric: dict[MetricKey, list[ExtractedRule]] = {}
-    for rule in rules:
-        by_metric.setdefault(rule.metric_key, []).append(rule)
+    # Step 1 — deduplicate before conflict detection
+    rules = _deduplicate_rules(rules)
 
-    for metric_key, candidates in by_metric.items():
+    # Step 2 — group active (non-superseded, non-rejected) rules by conflict key.
+    # Condition is normalised through the utility-service table so that variant
+    # spellings of the same infrastructure scope compare equal.
+    ConflictKey = tuple[MetricKey, str, str]
+    by_key: dict[ConflictKey, list[ExtractedRule]] = {}
+    for rule in rules:
+        if rule.status in {RuleStatus.REJECTED, RuleStatus.SUPERSEDED}:
+            continue  # deduped-out rules must not form conflict groups
+        norm_cond  = _normalise_conflict_condition(rule.condition_text)
+        norm_units = " ".join((rule.units or "").lower().split())
+        key: ConflictKey = (rule.metric_key, norm_cond, norm_units)
+        by_key.setdefault(key, []).append(rule)
+
+    for _key, candidates in by_key.items():
         if len(candidates) < 2:
             continue
 
-        # Compare all pairs — O(n²) acceptable for V1 (dozens of rules max)
+        # Compare all pairs — O(n²) acceptable for V1
         for i, r1 in enumerate(candidates):
             for r2 in candidates[i + 1:]:
                 if not _scopes_compatible(r1.applicability, r2.applicability):
                     continue
                 if not _values_conflict(r1, r2):
                     continue
-                # Conflict detected — assign shared group ID
+                # Genuine conflict — assign shared group ID
                 group_id = r1.conflict_group_id or r2.conflict_group_id or uuid4()
                 r1.conflict_group_id = group_id
                 r2.conflict_group_id = group_id
 
-    # For each conflict group, pick the recommended winner
+    # Step 3 — for each conflict group, pick the recommended winner
     groups: dict[UUID, list[ExtractedRule]] = {}
     for rule in rules:
         if rule.conflict_group_id is not None:
@@ -920,23 +1072,28 @@ def _values_conflict(r1: ExtractedRule, r2: ExtractedRule) -> bool:
 def _pick_conflict_winner(rules: list[ExtractedRule]) -> ExtractedRule:
     """
     Recommendation logic for conflict resolution:
-      1. Prefer newer effective_date
+      1. Prefer newer effective_date (explicit date signals a newer amendment)
       2. Prefer higher semantic version (version_label)
-      3. Prefer higher confidence
-      4. Fallback: most recently created (created_at)
+      3. Prefer higher confidence (LLM certainty about the rule being real)
+      4. Fallback: lower value_number (more restrictive rule is safer default)
+
+    created_at is intentionally NOT a tiebreaker — insertion order is arbitrary
+    and biases toward the last-extracted (often lowest-confidence) rule.
 
     Returns the recommended rule. Does NOT mutate the list.
     """
-    def sort_key(r: ExtractedRule) -> tuple[int, tuple[int, ...], float, datetime]:
+    def sort_key(r: ExtractedRule) -> tuple[int, tuple[int, ...], float, float]:
         eff = r.effective_date or datetime.min.replace(tzinfo=timezone.utc)
         ver = _parse_semver(r.version_label or "")
         conf = r.confidence
-        ctime = r.created_at
+        # Negate value so that more restrictive (lower) values sort higher
+        # when all else is equal — e.g. prefer 35 ft height limit over 50 ft.
+        restrictiveness = -(r.value_number or r.value_min or 0.0)
         return (
             eff.toordinal(),
             ver,
             conf,
-            ctime,
+            restrictiveness,
         )
 
     return max(rules, key=sort_key)

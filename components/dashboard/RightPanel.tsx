@@ -17,7 +17,7 @@
 
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
-import { ChatPanel } from './ChatPanel'
+import { CopilotPanel } from './copilot/CopilotPanel'
 import { MetricsPanel } from './MetricsPanel'
 import {
   Bot,
@@ -36,6 +36,14 @@ export type RightPanelTab = 'copilot' | 'metrics' | 'issues' | 'checklist' | 'ru
 
 interface RightPanelProps {
   projectId?: string
+  /**
+   * Live UI context snapshot forwarded to the Copilot on every message.
+   * Pass this from the layout that knows the current page / active run.
+   *
+   * TODO: When the Speckle viewer is mounted (ViewerPanel.tsx), populate
+   * selectedObjectIds from the ObjectClicked event and pass them here.
+   */
+  copilotUiContext?: import('@/types').CopilotUiContext
   /** Controlled active tab. Falls back to internal state when undefined. */
   activeTab?: RightPanelTab
   onTabChange?: (tab: RightPanelTab) => void
@@ -70,6 +78,7 @@ const TABS: TabDef[] = [
 
 export function RightPanel({
   projectId,
+  copilotUiContext,
   activeTab: controlledTab,
   onTabChange,
   precheckContext,
@@ -136,8 +145,18 @@ export function RightPanel({
 
       {/* Tab content */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        {activeTab === 'copilot' && (
-          <ChatPanel />
+        {activeTab === 'copilot' && projectId && (
+          <CopilotPanel
+            projectId={projectId}
+            uiContext={copilotUiContext}
+          />
+        )}
+        {activeTab === 'copilot' && !projectId && (
+          <div className="flex h-full items-center justify-center p-4">
+            <p className="text-xs text-muted-foreground text-center">
+              Open a project to use the Copilot.
+            </p>
+          </div>
         )}
 
         {activeTab === 'metrics' && (

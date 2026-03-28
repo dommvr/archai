@@ -26,14 +26,17 @@ If `CLAUDE.md` and `AGENTS.md` conflict on conventions, follow `AGENTS.md`.
 
 ### What is intentionally NOT implemented yet
 - The 9 AI tool logic (all are stubs/placeholders)
-- FastAPI backend
 - LangGraph agent flows
-- Supabase pgvector / RAG
+- Supabase pgvector / RAG (seam exists — retriever returns empty until active)
 - @speckle/viewer package mounting (clean placeholder wrapper exists)
 - Replicate API calls
 - Ladybug Tools integration
 - Real-time Supabase subscriptions beyond auth
 - IFC/Revit export flows
+
+### What IS now implemented (beyond the scaffold)
+- Tool 1: Smart Zoning & Code Checker (FastAPI backend, rule extraction, compliance engine)
+- **Copilot**: Project-scoped threaded AI assistant (GPT-5.4, FastAPI, Supabase persistence)
 
 ---
 
@@ -168,6 +171,70 @@ All future AI tool entry points use these comment markers:
 // SPECKLE EXPORT PLACEHOLDER
 ```
 Never remove these until the integration is actually implemented.
+
+Copilot-specific integration seams:
+```
+// TODO: pgvector retrieval not yet active — see copilot/retriever.py
+// TODO: copilot-attachments storage bucket not yet created
+// TODO: Forward viewer selection into copilotUiContext.selectedObjectIds
+// TODO: Activate embedding pipeline (OPENAI_API_KEY required)
+```
+
+### Copilot Architecture (implemented)
+
+The Copilot is a **project-scoped, threaded, tool-using AI assistant** backed by GPT-5.4.
+
+**Data model** (Supabase, migration `20240301000014_copilot_schema.sql`):
+- `copilot_threads` — one conversation per project, many per project
+- `copilot_messages` — user/assistant/tool/system messages, persist across sessions
+- `copilot_attachments` — file/image metadata (binaries in Supabase Storage bucket `copilot-attachments`)
+- `copilot_thread_summaries` — optional LLM-compressed history for long threads
+
+**Backend module** (`backend/app/copilot/`):
+- `schemas.py` — Pydantic v2 request/response shapes (camelCase aliases matching TS types)
+- `repositories.py` — all Supabase CRUD (no business logic)
+- `context_builder.py` — assembles per-request context from project meta + page + history + retrieval
+- `retriever.py` — pgvector similarity search (safe stub until `OPENAI_API_KEY` + pgvector active)
+- `tools.py` — tool registry + executor (`get_project_summary`, `get_issues`, `get_rules`, etc.)
+- `service.py` — LLM orchestration loop (GPT-5.4 → tool call → re-submit → persist)
+- `router.py` — FastAPI routes under `/copilot/...`
+
+**Next.js routes** (`app/api/copilot/`):
+- `threads/route.ts` — POST create thread
+- `threads/[threadId]/route.ts` — GET/PATCH/DELETE thread
+- `threads/[threadId]/messages/route.ts` — GET list / POST send message (main turn endpoint)
+- `threads/[threadId]/attachments/route.ts` — GET/POST attachments
+- `projects/[projectId]/threads/route.ts` — GET list threads for project
+
+**Frontend** (`components/dashboard/copilot/`):
+- `CopilotPanel.tsx` — main component (replaces `ChatPanel`; includes thread sidebar + message area)
+- `CopilotThreadList.tsx` — collapsible thread list with archive
+- `CopilotMessageList.tsx` — message bubbles with basic markdown + tool result strips
+- `CopilotComposer.tsx` — textarea composer with file attachment support
+- `CopilotEmptyState.tsx` — empty state with quick prompts
+- `CopilotContextBadge.tsx` — small indicator showing what context the AI can see
+
+**Hook**: `hooks/useCopilot.ts` — manages thread list, active thread, message state, send flow
+
+**Shared proxy**: `lib/api/proxy.ts` — shared `authenticateRequest` + `proxyFastApi` helpers (avoid duplicating in every API route)
+
+**Tool status**:
+| Tool | Status | Notes |
+|------|--------|-------|
+| `get_project_summary` | ✅ Live | Always works |
+| `get_run_history` | ✅ Live | Always works |
+| `get_metrics` | ⚠️ Partial | Returns readiness score; GFA/carbon awaits geometry snapshot pipeline |
+| `get_issues` | ⚠️ Partial | Works when compliance engine has run for the given run_id |
+| `get_rules` | ✅ Live | Returns approved/reviewed extracted rules |
+| `get_checklist` | ⚠️ Placeholder | Returns `not_ready` — checklist population pending Tool 1 eval pipeline |
+| `get_viewer_selection` | ⚠️ Placeholder | Returns `not_ready` until Speckle viewer is mounted |
+| `search_project_docs` | ⚠️ Partial | Returns doc titles; semantic search pending pgvector + OPENAI_API_KEY |
+
+**Env vars required for Copilot**:
+- `OPENAI_API_KEY` — for GPT-5.4 calls (required for LLM responses)
+- `NEXT_PUBLIC_API_URL` / `API_URL` — FastAPI backend URL (already needed for Tool 1)
+- Create `copilot-attachments` bucket in Supabase Storage (for file uploads)
+- pgvector extension + `OPENAI_API_KEY` (for semantic search — optional, degrades gracefully)
 
 ---
 

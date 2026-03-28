@@ -40,9 +40,25 @@ interface ProjectViewerClientProps {
    * previewModelId — it routes to the plain viewer URL instead.
    */
   previewModelId?: string | null
+  /**
+   * Called whenever the user clicks an object in the viewer.
+   * Receives null when clicking empty space (deselect).
+   * Used by the parent layout to forward selection into the Copilot UI context.
+   */
+  onObjectClick?: (obj: import('@/types').ViewerSelectedObject | null) => void
+  /**
+   * Called once the model ref is resolved so the parent can forward the
+   * active model ref id into the Copilot UI context.
+   */
+  onModelRefResolved?: (modelRefId: string | null) => void
 }
 
-export function ProjectViewerClient({ projectId, previewModelId }: ProjectViewerClientProps) {
+export function ProjectViewerClient({
+  projectId,
+  previewModelId,
+  onObjectClick,
+  onModelRefResolved,
+}: ProjectViewerClientProps) {
   const [modelRef, setModelRef] = useState<SpeckleModelRef | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -52,23 +68,26 @@ export function ProjectViewerClient({ projectId, previewModelId }: ProjectViewer
 
     async function resolve() {
       try {
+        let ref: SpeckleModelRef | null = null
         if (previewModelId) {
           // Preview mode: find the specific model ref from the project list.
           // There is no single-ref-by-id endpoint; list all and find by ID.
           // The list is typically small (project model library).
           const { modelRefs } = await precheckApi.listProjectModelRefs(projectId)
-          if (!cancelled) {
-            setModelRef(modelRefs.find((r) => r.id === previewModelId) ?? null)
-          }
+          ref = modelRefs.find((r) => r.id === previewModelId) ?? null
         } else {
           // Default: load the project's active model
-          const ref = await precheckApi.getProjectActiveModelRef(projectId)
-          if (!cancelled) {
-            setModelRef(ref ?? null)
-          }
+          ref = await precheckApi.getProjectActiveModelRef(projectId) ?? null
+        }
+        if (!cancelled) {
+          setModelRef(ref)
+          onModelRefResolved?.(ref?.id ?? null)
         }
       } catch {
-        if (!cancelled) setModelRef(null)
+        if (!cancelled) {
+          setModelRef(null)
+          onModelRefResolved?.(null)
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -76,7 +95,7 @@ export function ProjectViewerClient({ projectId, previewModelId }: ProjectViewer
 
     void resolve()
     return () => { cancelled = true }
-  }, [projectId, previewModelId])
+  }, [projectId, previewModelId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) {
     return (
@@ -124,6 +143,7 @@ export function ProjectViewerClient({ projectId, previewModelId }: ProjectViewer
       <SpeckleViewer
         selectedIssue={null}
         modelRef={modelRef}
+        onObjectClick={onObjectClick}
       />
     </div>
   )
