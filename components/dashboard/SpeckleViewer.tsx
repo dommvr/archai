@@ -315,17 +315,31 @@ export function SpeckleViewer({ selectedIssue, modelRef, onObjectClick }: Speckl
   }, [modelRef?.streamId, modelRef?.versionId, speckleServerUrl])
 
   // Relay container resize events to the Speckle viewer so the WebGL canvas
-  // redraws at the correct dimensions after a panel drag or layout change.
-  // Without this, viewer.init() bakes the canvas size at mount time and the
-  // canvas never updates when the container shrinks/grows via the split handle.
+  // redraws at the correct pixel dimensions and camera aspect ratio after any
+  // panel drag or layout change. Without this, viewer.init() bakes the canvas
+  // size at mount time: the canvas CSS stretches to fill the new container but
+  // the WebGL drawingBuffer stays at the old pixel size → stretched image.
+  //
+  // viewer.resize() reads container.offsetWidth/offsetHeight internally and
+  // also calls extension.onResize() on CameraController, which recomputes
+  // perspectiveCamera.aspect and calls updateProjectionMatrix().
+  //
+  // We use contentRect to guard against zero-size observations (e.g. when the
+  // panel is collapsed or the viewer is not yet painted) which would corrupt
+  // the renderer state.
   useEffect(() => {
     const container = viewerContainerRef.current
     if (!container) return
 
-    const observer = new ResizeObserver(() => {
-      if (viewerInstanceRef.current) {
-        try { viewerInstanceRef.current.resize() } catch { /* ignore */ }
-      }
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (!entry || !viewerInstanceRef.current) return
+      const { width, height } = entry.contentRect
+      // Skip degenerate sizes — renderer.setSize(0, 0) corrupts state.
+      if (width < 1 || height < 1) return
+      try {
+        viewerInstanceRef.current.resize()
+      } catch { /* ignore — viewer may not be fully initialised yet */ }
     })
     observer.observe(container)
     return () => { observer.disconnect() }

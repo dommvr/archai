@@ -311,6 +311,72 @@ class CopilotRepository:
         )
         return [CopilotAttachment.model_validate(row) for row in result.data]
 
+    async def get_attachments_by_ids(
+        self, attachment_ids: list[UUID]
+    ) -> list[CopilotAttachment]:
+        """Fetch specific attachment rows by primary key."""
+        if not attachment_ids:
+            return []
+        ids = [str(a) for a in attachment_ids]
+        result = (
+            await self._db.table("copilot_attachments")
+            .select("*")
+            .in_("id", ids)
+            .execute()
+        )
+        return [CopilotAttachment.model_validate(row) for row in result.data]
+
+    async def create_signed_read_url(
+        self,
+        storage_path: str,
+        expires_in: int = 300,
+    ) -> str | None:
+        """
+        Generates a time-limited signed read URL for a file in the
+        copilot-attachments bucket using the service-role client.
+
+        Returns None on failure (bucket not created, path not found, etc.)
+        rather than raising — callers degrade gracefully.
+
+        Parameters:
+          storage_path  — the value stored in copilot_attachments.storage_path
+          expires_in    — URL lifetime in seconds (default 5 min, enough for
+                          one LLM turn)
+        """
+        try:
+            signed = await self._db.storage.from_(
+                "copilot-attachments"
+            ).create_signed_url(storage_path, expires_in)
+            # supabase-py returns {"signedURL": "...", "error": null}
+            url: str | None = signed.get("signedURL") or signed.get("signed_url")
+            return url
+        except Exception as exc:
+            log.warning(
+                "create_signed_read_url: failed for path=%r: %s",
+                storage_path, exc,
+            )
+            return None
+
+    async def mark_attachment_uploaded(self, attachment_id: UUID) -> None:
+        """
+        Stamps uploaded_at into context_metadata so we can distinguish
+        attachments whose bytes are actually in Storage from pending rows.
+        The copilot_attachments table has no dedicated status column, so we
+        use the existing context_metadata JSONB field.
+        """
+        from datetime import datetime, timezone
+        await (
+            self._db.table("copilot_attachments")
+            .update({
+                "context_metadata": {
+                    "upload_status": "uploaded",
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                }
+            })
+            .eq("id", str(attachment_id))
+            .execute()
+        )
+
     # ── Project metadata helpers (used by context builder) ────
 
     async def get_geometry_snapshot_for_model_ref(
@@ -504,6 +570,130 @@ class CopilotRepository:
             for row in result.data
         ]
 
+    async def get_all_extracted_rules(
+        self,
+        project_id: UUID,
+        status_filter: list[str] | None = None,
+        metric_key: str | None = None,
+        document_id: UUID | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """
+        Returns extracted rules for the project, optionally filtered.
+        No status filter by default — returns ALL statuses (draft, reviewed,
+        approved, auto_approved, rejected, superseded).
+
+        Schema source: migration 20240301000001 + 20240301000010.
+        """
+        q = (
+            self._db.table("extracted_rules")
+            .select(
+                "id, rule_code, title, description, metric_key, operator, "
+                "value_number, value_min, value_max, units, "
+                "status, source_kind, is_authoritative, is_recommended, "
+                "confidence, extraction_notes, conflict_group_id, document_id"
+            )
+            .eq("project_id", str(project_id))
+        )
+        if status_filter:
+            q = q.in_("status", status_filter)
+        if metric_key:
+            q = q.eq("metric_key", metric_key)
+        if document_id:
+            q = q.eq("document_id", str(document_id))
+
+        result = (
+            await q.order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        log.debug(
+            "get_all_extracted_rules: project=%s status_filter=%s metric=%s rows=%d",
+            project_id, status_filter, metric_key, len(result.data),
+        )
+        return [
+            {
+                "id":               row["id"],
+                "rule_code":        row.get("rule_code"),
+                "title":            row.get("title"),
+                "description":      row.get("description"),
+                "metric_key":       row.get("metric_key"),
+                "operator":         row.get("operator"),
+                "value_number":     row.get("value_number"),
+                "value_min":        row.get("value_min"),
+                "value_max":        row.get("value_max"),
+                "units":            row.get("units"),
+                "status":           row.get("status"),
+                "source_kind":      row.get("source_kind"),
+                "is_authoritative": row.get("is_authoritative"),
+                "is_recommended":   row.get("is_recommended"),
+                "confidence":       row.get("confidence"),
+                "extraction_notes": row.get("extraction_notes"),
+                "conflict_group_id": row.get("conflict_group_id"),
+                "document_id":      row.get("document_id"),
+            }
+            for row in result.data
+        ]
+
+    async def get_rules_status_summary(
+        self, project_id: UUID
+    ) -> dict[str, int]:
+        """
+        Returns a count of extracted rules grouped by status for the project.
+        Uses a single query fetching all rules and counting in Python (no RPC needed).
+        """
+        result = (
+            await self._db.table("extracted_rules")
+            .select("status")
+            .eq("project_id", str(project_id))
+            .execute()
+        )
+        counts: dict[str, int] = {}
+        for row in result.data:
+            s = row.get("status") or "unknown"
+            counts[s] = counts.get(s, 0) + 1
+        log.debug("get_rules_status_summary: project=%s counts=%s", project_id, counts)
+        return counts
+
+    async def get_speckle_model_refs(
+        self, project_id: UUID, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """
+        Returns all speckle_model_refs for the project.
+
+        Schema source: migration 20240301000001 + 20240301000012 (synced_at).
+          Columns: id, stream_id, branch_name, version_id, model_name,
+                   commit_message, selected_at, synced_at
+        """
+        result = (
+            await self._db.table("speckle_model_refs")
+            .select(
+                "id, stream_id, branch_name, version_id, model_name, "
+                "commit_message, selected_at, synced_at"
+            )
+            .eq("project_id", str(project_id))
+            .order("selected_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        log.debug(
+            "get_speckle_model_refs: project=%s rows=%d",
+            project_id, len(result.data),
+        )
+        return [
+            {
+                "id":             row["id"],
+                "stream_id":      row["stream_id"],
+                "branch_name":    row.get("branch_name"),
+                "version_id":     row["version_id"],
+                "model_name":     row.get("model_name"),
+                "commit_message": row.get("commit_message"),
+                "selected_at":    row.get("selected_at"),
+                "synced_at":      row.get("synced_at"),
+            }
+            for row in result.data
+        ]
+
     async def get_uploaded_documents(
         self, project_id: UUID, limit: int = 10
     ) -> list[dict[str, Any]]:
@@ -568,34 +758,196 @@ class CopilotRepository:
         project_id: UUID,
         query_embedding: list[float] | None,
         top_k: int = 5,
+        similarity_threshold: float = 0.50,
     ) -> list[dict[str, Any]]:
         """
-        Vector similarity search over project document chunks.
+        Vector similarity search over project document chunks via pgvector.
 
-        TODO: This requires pgvector to be active and an embedding column on
-        document_chunks. Currently returns an empty list as a safe fallback.
-        When the embedding pipeline is ready:
-          1. Enable pgvector extension in Supabase
-          2. Add `embedding vector(1536)` column to document_chunks
-          3. Replace the stub below with an RPC call to match_document_chunks()
+        Calls the match_document_chunks() SQL function added in migration
+        20240301000016. That function:
+          1. Joins document_chunks → uploaded_documents on project_id
+          2. Filters chunks where embedding IS NOT NULL
+          3. Filters by cosine similarity >= similarity_threshold
+          4. Returns top-k rows ordered by similarity DESC
+
+        Returns rows with shape:
+          {id, document_id, chunk_index, chunk_text, page, section,
+           metadata, file_name, document_type, similarity}
+
+        Falls back to an empty list when:
+          - query_embedding is None (OpenAI key not set)
+          - The RPC fails (pgvector not enabled, migration not applied)
         """
         if query_embedding is None:
-            log.debug("search_document_chunks: no embedding provided, skipping retrieval")
+            log.debug(
+                "search_document_chunks: no embedding — skipping retrieval for project %s",
+                project_id,
+            )
             return []
 
-        # TODO: Replace with actual pgvector similarity search
-        # result = await self._db.rpc(
-        #     "match_document_chunks",
-        #     {
-        #         "query_embedding": query_embedding,
-        #         "match_project_id": str(project_id),
-        #         "match_count": top_k,
-        #     },
-        # ).execute()
-        # return result.data
+        try:
+            result = await self._db.rpc(
+                "match_document_chunks",
+                {
+                    "query_embedding": query_embedding,
+                    "match_project_id": str(project_id),
+                    "match_count": top_k,
+                    "match_threshold": similarity_threshold,
+                },
+            ).execute()
+            rows = result.data or []
+            log.debug(
+                "search_document_chunks: project=%s matched=%d threshold=%.2f",
+                project_id, len(rows), similarity_threshold,
+            )
+            return rows
+        except Exception as exc:
+            # Graceful fallback: RPC fails if pgvector is not enabled or the
+            # migration has not been applied yet.
+            log.warning(
+                "search_document_chunks: RPC failed (pgvector not enabled?): %s",
+                exc,
+            )
+            return []
 
-        log.debug(
-            "search_document_chunks: pgvector retrieval not yet active for project %s",
-            project_id,
+    # ── Project notes ─────────────────────────────────────────
+    # Schema: migration 20240301000015_project_notes.sql
+    # Columns: id, project_id, user_id, title, content, pinned,
+    #          source_type, source_message_id, created_at, updated_at
+
+    def _normalise_note(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id":                row["id"],
+            "project_id":        row["project_id"],
+            "user_id":           row["user_id"],
+            "title":             row["title"],
+            "content":           row["content"],
+            "pinned":            row.get("pinned", False),
+            "source_type":       row.get("source_type", "manual"),
+            "source_message_id": row.get("source_message_id"),
+            "created_at":        row["created_at"],
+            "updated_at":        row["updated_at"],
+        }
+
+    async def list_project_notes(
+        self, project_id: UUID, user_id: UUID, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Pinned notes first, then newest updated."""
+        result = (
+            await self._db.table("project_notes")
+            .select("id, project_id, user_id, title, content, pinned, "
+                    "source_type, source_message_id, created_at, updated_at")
+            .eq("project_id", str(project_id))
+            .eq("user_id", str(user_id))
+            .order("pinned", desc=True)
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
         )
-        return []
+        log.debug("list_project_notes: project=%s rows=%d", project_id, len(result.data))
+        return [self._normalise_note(r) for r in result.data]
+
+    async def get_pinned_notes(
+        self, project_id: UUID, user_id: UUID, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        result = (
+            await self._db.table("project_notes")
+            .select("id, project_id, user_id, title, content, pinned, "
+                    "source_type, source_message_id, created_at, updated_at")
+            .eq("project_id", str(project_id))
+            .eq("user_id", str(user_id))
+            .eq("pinned", True)
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return [self._normalise_note(r) for r in result.data]
+
+    async def search_notes(
+        self, project_id: UUID, user_id: UUID, query: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Simple text search over note title + content using PostgreSQL ilike.
+        TODO: Replace with full-text or pgvector search when pipeline is ready.
+        """
+        q = f"%{query}%"
+        result = (
+            await self._db.table("project_notes")
+            .select("id, project_id, user_id, title, content, pinned, "
+                    "source_type, source_message_id, created_at, updated_at")
+            .eq("project_id", str(project_id))
+            .eq("user_id", str(user_id))
+            .or_(f"title.ilike.{q},content.ilike.{q}")
+            .order("pinned", desc=True)
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        log.debug("search_notes: project=%s query=%r rows=%d", project_id, query, len(result.data))
+        return [self._normalise_note(r) for r in result.data]
+
+    async def create_note(
+        self,
+        project_id: UUID,
+        user_id: UUID,
+        title: str,
+        content: str,
+        pinned: bool = False,
+        source_type: str = "manual",
+        source_message_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        data: dict[str, Any] = {
+            "id":          str(uuid4()),
+            "project_id":  str(project_id),
+            "user_id":     str(user_id),
+            "title":       title,
+            "content":     content,
+            "pinned":      pinned,
+            "source_type": source_type,
+            "created_at":  now,
+            "updated_at":  now,
+        }
+        if source_message_id is not None:
+            data["source_message_id"] = str(source_message_id)
+        result = await self._db.table("project_notes").insert(data).execute()
+        log.debug("create_note: project=%s id=%s", project_id, data["id"])
+        return self._normalise_note(result.data[0])
+
+    async def update_note(
+        self,
+        note_id: UUID,
+        user_id: UUID,
+        title: str | None = None,
+        content: str | None = None,
+        pinned: bool | None = None,
+    ) -> dict[str, Any] | None:
+        update_data: dict[str, Any] = {
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        if title is not None:
+            update_data["title"] = title
+        if content is not None:
+            update_data["content"] = content
+        if pinned is not None:
+            update_data["pinned"] = pinned
+        result = (
+            await self._db.table("project_notes")
+            .update(update_data)
+            .eq("id", str(note_id))
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        if not result.data:
+            return None
+        return self._normalise_note(result.data[0])
+
+    async def delete_note(self, note_id: UUID, user_id: UUID) -> bool:
+        result = (
+            await self._db.table("project_notes")
+            .delete()
+            .eq("id", str(note_id))
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        return bool(result.data)

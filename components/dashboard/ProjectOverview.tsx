@@ -32,6 +32,7 @@ import * as precheckApi from '@/lib/precheck/api'
 import type { PrecheckRun, SpeckleModelRef } from '@/lib/precheck/types'
 import { RightPanel } from './RightPanel'
 import { ProjectDefaultSiteContextPanel } from './precheck/SiteContextPicker'
+import { ProjectNotesPanel } from './ProjectNotesPanel'
 import { ResizableHorizontalSplit } from '@/components/ui/resizable-horizontal-split'
 
 interface ProjectOverviewProps {
@@ -278,6 +279,9 @@ export function ProjectOverview({ projectId, projectName }: ProjectOverviewProps
                 </div>
               )}
             </section>
+
+            {/* Notes */}
+            <ProjectNotesPanel projectId={projectId} />
 
             {/* Documents shortcut */}
             <section>

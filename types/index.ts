@@ -225,6 +225,38 @@ export interface CopilotSendMessageResponse {
   toolMessages?: CopilotMessage[]
 }
 
+// ── Project notes ─────────────────────────────────────────────
+
+export type NoteSourceType = 'manual' | 'copilot'
+
+export interface ProjectNote {
+  id: string
+  projectId: string
+  userId: string
+  title: string
+  content: string
+  pinned: boolean
+  sourceType: NoteSourceType
+  /** ID of the copilot_messages row that was saved as this note. */
+  sourceMessageId?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateNotePayload {
+  title: string
+  content: string
+  pinned?: boolean
+  sourceType?: NoteSourceType
+  sourceMessageId?: string | null
+}
+
+export interface UpdateNotePayload {
+  title?: string
+  content?: string
+  pinned?: boolean
+}
+
 /**
  * Minimal user profile record stored in public.user_profiles.
  * Mirrors the database schema — nullable optional fields match DB defaults.

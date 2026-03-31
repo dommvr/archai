@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback } from 'react'
-import { Send, Paperclip, Loader2, X, Image } from 'lucide-react'
+import { Send, Paperclip, Loader2, X, Image, Camera } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -163,9 +163,20 @@ export function CopilotComposer({
           aria-hidden="true"
         />
 
-        {/* TODO: Screenshot/snip button — captures viewer or screen region.
-            Implement when Speckle viewer is mounted and browser capture API
-            integration is scoped. See CopilotScreenshotButton placeholder below. */}
+        {/* Screenshot button — captures the browser tab using getDisplayMedia
+            with preferCurrentTab:true (no OS screen picker, tab-only). */}
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-white self-end"
+          onClick={() => captureTabScreenshot(threadId, projectId, setAttachments, setUploadError)}
+          disabled={disabled || !threadId}
+          aria-label="Capture screenshot"
+          title={!threadId ? 'Send a message to start a conversation first' : 'Attach a screenshot of the current view'}
+        >
+          <Camera className="h-3.5 w-3.5" />
+        </Button>
 
         {/* Text input — min 4 rows so it feels spacious from the start */}
         <textarea
@@ -244,28 +255,107 @@ function AttachmentChip({
 }
 
 /**
+ * Captures the current browser tab using getDisplayMedia with preferCurrentTab.
+ * This captures only the app viewport — no OS-level screen picker appears.
+ * The captured frame is drawn onto a canvas, converted to a PNG blob, and fed
+ * into the existing uploadAttachment flow as a "screenshot" attachment type.
+ *
+ * Browser support: Chrome/Edge 107+ (preferCurrentTab). Falls back gracefully
+ * with an error message if the API is unavailable or the user cancels.
+ */
+async function captureTabScreenshot(
+  threadId: string | null,
+  projectId: string,
+  setAttachments: React.Dispatch<React.SetStateAction<StagedAttachment[]>>,
+  setUploadError: React.Dispatch<React.SetStateAction<string | null>>,
+): Promise<void> {
+  if (!threadId) return
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    setUploadError('Screenshot capture is not supported in this browser.')
+    return
+  }
+
+  let stream: MediaStream | null = null
+  try {
+    // preferCurrentTab avoids the OS screen-picker and captures only this tab.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    stream = await (navigator.mediaDevices as any).getDisplayMedia({
+      video: { displaySurface: 'browser' },
+      audio: false,
+      // Chrome 107+: skip the picker and capture the current tab directly
+      preferCurrentTab: true,
+    } as DisplayMediaStreamOptions)
+  } catch {
+    // User cancelled or permission denied — not an error worth surfacing
+    return
+  }
+
+  // stream is guaranteed non-null here (we returned above on catch)
+  const activeStream = stream!
+
+  try {
+    const track = activeStream.getVideoTracks()[0]
+    // ImageCapture gives us a single frame without needing a video element
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const capture = new (window as any).ImageCapture(track)
+    const bitmap: ImageBitmap = await capture.grabFrame()
+
+    const canvas = document.createElement('canvas')
+    canvas.width  = bitmap.width
+    canvas.height = bitmap.height
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0)
+    bitmap.close()
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png')
+    })
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const file = new File([blob], `screenshot-${timestamp}.png`, { type: 'image/png' })
+    const previewUrl = URL.createObjectURL(file)
+    const staged: StagedAttachment = { previewUrl, file }
+    setAttachments((prev) => [...prev, staged])
+
+    uploadAttachment(file, previewUrl, threadId, projectId, 'screenshot')
+      .then((attachmentId) => {
+        setAttachments((prev) =>
+          prev.map((a) => (a.previewUrl === previewUrl ? { ...a, attachmentId } : a))
+        )
+        URL.revokeObjectURL(previewUrl)
+      })
+      .catch(() => {
+        setUploadError('Failed to upload screenshot')
+        setAttachments((prev) => prev.filter((a) => a.previewUrl !== previewUrl))
+        URL.revokeObjectURL(previewUrl)
+      })
+  } catch (err) {
+    setUploadError(`Screenshot failed: ${err instanceof Error ? err.message : 'unknown error'}`)
+  } finally {
+    activeStream.getTracks().forEach((t) => t.stop())
+  }
+}
+
+/**
  * Uploads a file attachment to the backend.
  * Returns the attachment ID on success.
  *
  * Flow:
  *   1. POST /api/copilot/threads/[id]/attachments?action=upload-url
- *      → get signed Supabase Storage upload URL + attachmentId
- *   2. PUT to the signed URL with the raw file bytes
+ *      → get a Supabase Storage signed upload URL + attachmentId
+ *   2. PUT to the signed URL with the raw file bytes (no auth header needed)
  *   3. Return the attachmentId for use in SendMessageRequest
  *
- * TODO: Step 2 requires the "copilot-attachments" Supabase Storage bucket
- * to be created. Until the bucket exists, the signed URL will be a placeholder
- * and uploads will fail. The attachment chip will remain in "uploading" state.
+ * Requires the "copilot-attachments" bucket in Supabase Storage.
+ * If the bucket does not exist, step 1 returns 503 with an actionable message.
  */
 async function uploadAttachment(
   file: File,
   _previewUrl: string,
   threadId: string,
-  projectId: string
+  projectId: string,
+  forceType?: 'image' | 'document' | 'screenshot',
 ): Promise<string> {
-  const attachmentType = file.type.startsWith('image/')
-    ? 'image'
-    : 'document'
+  const attachmentType = forceType ?? (file.type.startsWith('image/') ? 'image' : 'document')
 
   // Step 1: Get signed upload URL
   const metaRes = await fetch(
@@ -274,6 +364,7 @@ async function uploadAttachment(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        threadId,
         projectId,
         filename:       file.name,
         mimeType:       file.type,
@@ -284,7 +375,15 @@ async function uploadAttachment(
   )
 
   if (!metaRes.ok) {
-    throw new Error(`Failed to get upload URL (${metaRes.status})`)
+    let detail = `Failed to get upload URL (${metaRes.status})`
+    // Surface bucket-not-configured error with an actionable message
+    if (metaRes.status === 503) {
+      try {
+        const body = (await metaRes.json()) as { detail?: string }
+        if (body.detail) detail = body.detail
+      } catch { /* ignore parse error */ }
+    }
+    throw new Error(detail)
   }
 
   const { uploadUrl, attachmentId } = (await metaRes.json()) as {
@@ -292,13 +391,8 @@ async function uploadAttachment(
     attachmentId: string
   }
 
-  // Step 2: Upload to Supabase Storage
-  // TODO: uploadUrl will be a placeholder until the storage bucket is created.
-  if (uploadUrl.startsWith('__TODO_STORAGE_SIGNED_URL__')) {
-    // Return the ID anyway so the metadata row exists — file bytes not stored yet
-    return attachmentId
-  }
-
+  // Step 2: Upload file bytes directly to Supabase Storage via the signed URL.
+  // The signed URL is a time-limited authorised PUT endpoint — no auth header needed.
   const uploadRes = await fetch(uploadUrl, {
     method: 'PUT',
     headers: { 'Content-Type': file.type },

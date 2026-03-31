@@ -40,7 +40,7 @@ from uuid import UUID
 
 from openai import AsyncOpenAI
 
-from app.copilot.context_builder import CopilotContextBuilder
+from app.copilot.context_builder import CopilotContextBuilder, ResolvedAttachment
 from app.copilot.repositories import CopilotRepository
 from app.copilot.retriever import CopilotRetriever
 from app.copilot.schemas import (
@@ -99,6 +99,7 @@ class CopilotService:
             user_message=content,
             ui_context=ui_context,
             attachment_ids=attachment_ids,
+            user_id=user_id,
         )
 
         # ── 3. Assemble first-turn input ──────────────────────
@@ -123,7 +124,13 @@ class CopilotService:
             })
 
         input_messages.extend(ctx.history)
-        input_messages.append({"role": "user", "content": content})
+
+        # Build the final user message — may include image_url content blocks
+        # when the user attached images or screenshots this turn.
+        user_msg_content = _build_user_message_content(
+            content, ctx.attachments
+        )
+        input_messages.append({"role": "user", "content": user_msg_content})
 
         # Debug: log item types so stray function_call_output items are visible
         if log.isEnabledFor(logging.DEBUG):
@@ -144,6 +151,8 @@ class CopilotService:
         executor = CopilotToolExecutor(
             repo=self._repo,
             project_id=project_id,
+            retriever=self._retriever,
+            user_id=user_id,
             ui_context_run_id=ui_context.active_run_id if ui_context else None,
             viewer_selection=sel,
             active_model_ref_id=ui_context.active_model_ref_id if ui_context else None,
@@ -379,6 +388,71 @@ def _extract_text_from_response(response: Any) -> str:
                 return text
 
     return ""
+
+
+def _build_user_message_content(
+    text: str,
+    attachments: list[ResolvedAttachment],
+) -> str | list[dict[str, Any]]:
+    """
+    Build the `content` field for the final user message in the Responses API
+    input list.
+
+    If there are no attachments, returns the text string directly (simplest form).
+
+    If images or screenshots are attached and their signed URLs were resolved,
+    returns a multi-part content list with text + image_url blocks.  This is
+    the format required by the Responses API for vision input.
+
+    Non-image attachments (documents) are acknowledged in a short text note
+    appended to the user text so the model knows they exist, but their raw
+    bytes are not submitted (content extraction is a TODO).
+
+    Attachments whose signed_url is None (Storage not configured or file not
+    found) are mentioned as a note so the model can explain the limitation.
+    """
+    if not attachments:
+        return text
+
+    # Collect image blocks and build a notes string for non-image / unavailable
+    image_blocks: list[dict[str, Any]] = []
+    doc_notes: list[str] = []
+
+    for att in attachments:
+        if att.is_image and att.signed_url:
+            image_blocks.append({
+                "type": "image_url",
+                "image_url": {"url": att.signed_url},
+            })
+        elif att.is_image and not att.signed_url:
+            doc_notes.append(
+                f"[Image attached: {att.filename!r} — "
+                "file not accessible this turn; Storage may not be configured]"
+            )
+        else:
+            # Non-image document
+            doc_notes.append(
+                f"[File attached: {att.filename!r} "
+                f"(type: {att.mime_type or att.attachment_type}) — "
+                "content not extracted; refer to the attachment by name if needed]"
+            )
+
+    if not image_blocks and not doc_notes:
+        return text
+
+    # Compose the full user content
+    full_text = text
+    if doc_notes:
+        full_text = text + "\n\n" + "\n".join(doc_notes)
+
+    if not image_blocks:
+        # Only document notes — plain string is fine
+        return full_text
+
+    # Multi-part: text first, then image blocks
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": full_text}]
+    content.extend(image_blocks)
+    return content
 
 
 def _derive_thread_title(first_message: str, max_len: int = 60) -> str:

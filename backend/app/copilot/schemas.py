@@ -154,3 +154,37 @@ class AttachmentUploadUrlResponse(BaseSchema):
     upload_url: str
     storage_path: str
     attachment_id: UUID
+
+
+# ── Project notes ─────────────────────────────────────────────
+
+class NoteSourceType(str, Enum):
+    MANUAL  = "manual"
+    COPILOT = "copilot"
+
+
+class ProjectNote(BaseSchema):
+    id: UUID
+    project_id: UUID
+    user_id: UUID
+    title: str
+    content: str
+    pinned: bool = False
+    source_type: NoteSourceType = NoteSourceType.MANUAL
+    source_message_id: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CreateNoteRequest(BaseSchema):
+    title: str
+    content: str
+    pinned: bool = False
+    source_type: NoteSourceType = NoteSourceType.MANUAL
+    source_message_id: UUID | None = None
+
+
+class UpdateNoteRequest(BaseSchema):
+    title: str | None = None
+    content: str | None = None
+    pinned: bool | None = None

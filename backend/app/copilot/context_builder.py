@@ -25,7 +25,7 @@ from uuid import UUID
 
 from app.copilot.repositories import CopilotRepository
 from app.copilot.retriever import CopilotRetriever
-from app.copilot.schemas import CopilotMessage, CopilotMessageRole, CopilotUiContext
+from app.copilot.schemas import CopilotAttachmentType, CopilotMessage, CopilotUiContext
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,24 @@ Your responsibilities:
 
 Current page context: {page_context}
 {active_run_section}
+{pinned_notes_section}\
 """
+
+
+@dataclass
+class ResolvedAttachment:
+    """
+    An attachment that has been resolved to a signed read URL (or None if the
+    file is not yet in Storage or the bucket is unavailable).
+    """
+    attachment_id: str
+    filename: str
+    mime_type: str | None
+    attachment_type: str         # 'image' | 'document' | 'screenshot'
+    storage_path: str
+    signed_url: str | None       # None = not downloadable this turn
+    # Whether to include as image_url content block (True) or text note (False)
+    is_image: bool
 
 
 @dataclass
@@ -60,10 +77,11 @@ class BuiltContext:
     system_prompt: str
     history: list[dict[str, Any]]  # OpenAI message dicts
     retrieval_snippets: list[str]
-    attachment_paths: list[str]
+    attachment_paths: list[str]    # kept for logging; content is in attachments
+    attachments: list[ResolvedAttachment] = field(default_factory=list)
     # Used for logging/debug
-    project_id: UUID
-    thread_id: UUID
+    project_id: UUID = field(default_factory=lambda: UUID(int=0))
+    thread_id: UUID = field(default_factory=lambda: UUID(int=0))
     sources_used: list[str] = field(default_factory=list)
 
 
@@ -83,6 +101,7 @@ class CopilotContextBuilder:
         user_message: str,
         ui_context: CopilotUiContext | None,
         attachment_ids: list[UUID],
+        user_id: UUID | None = None,
     ) -> BuiltContext:
         sources_used: list[str] = []
 
@@ -106,14 +125,30 @@ class CopilotContextBuilder:
                 )
                 sources_used.append("active_run")
 
-        # ── 3. System prompt ──────────────────────────────────
+        # ── 3. Pinned notes (injected into system prompt) ─────
+        pinned_notes_section = ""
+        if user_id is not None:
+            pinned_notes = await self._repo.get_pinned_notes(
+                project_id=project_id,
+                user_id=user_id,
+                limit=5,
+            )
+            if pinned_notes:
+                lines = ["Pinned project notes (key decisions or constraints the user flagged):"]
+                for note in pinned_notes:
+                    lines.append(f"  • {note['title']}: {note['content']}")
+                pinned_notes_section = "\n".join(lines)
+                sources_used.append("pinned_notes")
+
+        # ── 4. System prompt ──────────────────────────────────
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             project_name=project_name,
             page_context=page_context,
             active_run_section=active_run_section,
+            pinned_notes_section=pinned_notes_section,
         ).strip()
 
-        # ── 4. Thread history ─────────────────────────────────
+        # ── 5. Thread history ─────────────────────────────────
         summary = await self._repo.get_thread_summary(thread_id)
         history_messages = await self._repo.get_recent_messages(
             thread_id=thread_id,
@@ -123,25 +158,75 @@ class CopilotContextBuilder:
         if history_dicts:
             sources_used.append("thread_history")
 
-        # ── 5. Retrieval over project docs ────────────────────
-        snippets = await self._retriever.retrieve(
-            project_id=project_id,
-            query=user_message,
-            top_k=5,
-        )
-        if snippets:
-            sources_used.append("document_retrieval")
+        # ── 6. Retrieval over project docs ────────────────────
+        # Only run retrieval when the query looks document-oriented.
+        # This avoids wasting embedding API calls on pure tool queries
+        # like "show me my metrics" or "what runs do I have".
+        snippets: list[str] = []
+        if _is_document_query(user_message):
+            snippets = await self._retriever.retrieve(
+                project_id=project_id,
+                query=user_message,
+            )
+            if snippets:
+                sources_used.append("document_retrieval")
+                log.debug(
+                    "Context: retrieved %d snippets for project=%s",
+                    len(snippets), project_id,
+                )
+            else:
+                log.debug(
+                    "Context: retrieval returned 0 snippets "
+                    "(no embeddings or below threshold) project=%s",
+                    project_id,
+                )
+        else:
+            log.debug(
+                "Context: skipping retrieval for non-document query %r",
+                user_message[:60],
+            )
 
-        # ── 6. Attachment paths ───────────────────────────────
+        # ── 7. Attachments — resolve to signed read URLs ──────
+        # Fetch the attachment rows for this turn, generate a short-lived
+        # signed read URL for each, and classify them as image vs document.
+        # Images (type=image|screenshot, mime_type=image/*) can be injected as
+        # image_url content blocks in the Responses API input.
+        # Documents are injected as a text note (content extraction not yet
+        # implemented for arbitrary file types).
+        resolved_attachments: list[ResolvedAttachment] = []
         attachment_paths: list[str] = []
+
         if attachment_ids:
-            for att_id in attachment_ids:
-                atts = await self._repo.get_attachments_for_thread(thread_id)
-                for att in atts:
-                    if att.id == att_id:
-                        attachment_paths.append(att.storage_path)
-            if attachment_paths:
+            rows = await self._repo.get_attachments_by_ids(attachment_ids)
+            for att in rows:
+                attachment_paths.append(att.storage_path)
+                signed_url = await self._repo.create_signed_read_url(att.storage_path)
+                is_image = (
+                    att.attachment_type in (
+                        CopilotAttachmentType.IMAGE,
+                        CopilotAttachmentType.SCREENSHOT,
+                    )
+                    or bool(att.mime_type and att.mime_type.startswith("image/"))
+                )
+                resolved_attachments.append(ResolvedAttachment(
+                    attachment_id=str(att.id),
+                    filename=att.filename,
+                    mime_type=att.mime_type,
+                    attachment_type=att.attachment_type.value,
+                    storage_path=att.storage_path,
+                    signed_url=signed_url,
+                    is_image=is_image,
+                ))
+
+            if resolved_attachments:
                 sources_used.append("attachments")
+                log.info(
+                    "Context: resolved %d attachment(s) for project=%s "
+                    "(images=%d, unavailable=%d)",
+                    len(resolved_attachments), project_id,
+                    sum(1 for a in resolved_attachments if a.is_image and a.signed_url),
+                    sum(1 for a in resolved_attachments if not a.signed_url),
+                )
 
         log.debug(
             "Context built for project=%s thread=%s sources=%s",
@@ -153,6 +238,7 @@ class CopilotContextBuilder:
             history=history_dicts,
             retrieval_snippets=snippets,
             attachment_paths=attachment_paths,
+            attachments=resolved_attachments,
             project_id=project_id,
             thread_id=thread_id,
             sources_used=sources_used,
@@ -243,3 +329,31 @@ def _messages_to_openai_format(
         len(messages), len(result), summary is not None,
     )
     return result
+
+
+# ── Document-query heuristic ──────────────────────────────────────────────────
+
+# Keywords that suggest the user is asking about document content rather than
+# live structured data.  Retrieval is only triggered when one of these terms
+# appears so we avoid spending an embedding API call on every turn.
+_DOC_KEYWORDS = (
+    "zoning", "code", "regulation", "bylaw", "ordinance",
+    "section", "clause", "article", "rule", "requirement",
+    "says", "states", "specifies", "according to", "document",
+    "permit", "setback", "height limit", "far limit",
+    "parking", "allowed", "prohibited", "maximum", "minimum",
+    "exception", "variance", "appeal", "condition",
+    "what does", "does it say", "cite", "quote",
+)
+
+
+def _is_document_query(message: str) -> bool:
+    """
+    Heuristic: returns True when the user message is likely asking about
+    the content of uploaded documents rather than live structured data.
+
+    Keeps retrieval selective — tool calls for metrics/runs/issues do
+    not trigger an unnecessary OpenAI embedding call.
+    """
+    lower = message.lower()
+    return any(kw in lower for kw in _DOC_KEYWORDS)

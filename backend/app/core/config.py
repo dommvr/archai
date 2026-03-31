@@ -60,10 +60,18 @@ class Settings(BaseSettings):
     zoneomics_api_key: str | None = None     # zoning data
 
     # ── Embeddings ────────────────────────────────────────────
-    # TODO: set when pgvector + OpenAI are wired
     openai_api_key: str | None = None
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
+
+    # ── Retrieval ─────────────────────────────────────────────
+    # Top-k chunks returned per Copilot query.
+    retrieval_top_k: int = 6
+    # Minimum cosine similarity (0–1) for a chunk to be included.
+    # Below this, chunks are too dissimilar to be useful context.
+    retrieval_similarity_threshold: float = 0.50
+    # Maximum number of chunks to embed per batch (OpenAI limit: 2048 inputs).
+    embedding_batch_size: int = 100
 
     # ── LLM Rule Extraction ───────────────────────────────────
     # TODO: set when LangGraph agent is wired

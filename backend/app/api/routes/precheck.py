@@ -602,7 +602,7 @@ async def evaluate_compliance(
                 metric_map = await engine.resolve_metrics(snapshot)
 
             # ── Deterministic evaluation ───────────────────────
-            checks = await engine.evaluate_rules(run_id, rules, metric_map, snapshot)
+            checks, _run_summary = await engine.evaluate_rules(run_id, rules, metric_map, snapshot)
 
             # ── Generate issues ────────────────────────────────
             rules_by_id = {r.id: r for r in rules}

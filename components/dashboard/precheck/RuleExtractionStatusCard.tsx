@@ -232,6 +232,7 @@ export function RuleExtractionStatusCard({
   const [metricFilter, setMetricFilter] = useState<MetricKey | 'all'>('all')
   const [showSuperseded, setShowSuperseded] = useState(false)
   const [showLowConf, setShowLowConf]       = useState(false)
+  const [showActive, setShowActive]         = useState(true)
 
   const { groups, standaloneRules, supersededRules } = useMemo(
     () => buildGrouping(rules),
@@ -245,8 +246,16 @@ export function RuleExtractionStatusCard({
     return acc
   }, {})
 
+  const manualCount = rules.filter((r) => r.sourceKind === 'manual').length
+
   const authoritative = rules.filter((r) => AUTHORITATIVE_RULE_STATUSES.has(r.status))
   const pending = rules.filter((r) => r.status === 'draft' && !r.isAuthoritative)
+
+  // Active rules = authoritative extracted rules + all manual rules.
+  // Shown in the top "Active Rules" section (intentionally duplicated from category buckets).
+  const activeRules = rules.filter(
+    (r) => r.sourceKind === 'manual' || AUTHORITATIVE_RULE_STATUSES.has(r.status)
+  )
 
   // Metric pills — only show metrics that actually have active (non-superseded) rules
   const activeRulesForPills = [...groups.flatMap(g => g.rules), ...standaloneRules]
@@ -354,6 +363,11 @@ export function RuleExtractionStatusCard({
                 {count} {STATUS_LABEL[status]}
               </span>
             ))}
+            {manualCount > 0 && (
+              <span className="text-[10px] font-medium rounded-full px-2 py-0.5 border text-violet-400 border-violet-400/30 bg-violet-400/10">
+                {manualCount} Manual
+              </span>
+            )}
           </div>
 
           {/* Conflict banner */}
@@ -428,6 +442,39 @@ export function RuleExtractionStatusCard({
               </div>
             )}
           </div>
+
+          {/* ── Active Rules: approved + manual (shown above category buckets) ── */}
+          {activeRules.length > 0 && (
+            <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/5 overflow-hidden">
+              {/* Section header */}
+              <button
+                onClick={() => setShowActive(v => !v)}
+                className="w-full flex items-center justify-between px-2.5 py-1.5 hover:bg-emerald-400/10 transition-colors"
+              >
+                <div className="flex items-center gap-1.5">
+                  <Check className="h-3 w-3 text-emerald-400 shrink-0" />
+                  <span className="text-[10px] font-medium text-emerald-400">
+                    Active Rules · {activeRules.length}
+                  </span>
+                </div>
+                {showActive ? <ChevronUp className="h-3 w-3 text-emerald-400/60" /> : <ChevronDown className="h-3 w-3 text-emerald-400/60" />}
+              </button>
+
+              {showActive && (
+                <div className="px-2.5 pb-2.5 pt-1 space-y-1.5">
+                  {activeRules.map(rule => (
+                    <RuleRow
+                      key={rule.id}
+                      rule={rule}
+                      isPending={pendingId === rule.id}
+                      // No approve/reject in the active section — these rules are
+                      // already authoritative. Read-only display only.
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ── Main content ── */}
           {!hasActiveContent && (searchQuery || metricFilter !== 'all') ? (

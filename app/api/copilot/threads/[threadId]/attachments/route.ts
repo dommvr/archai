@@ -20,6 +20,7 @@ import { authenticateRequest, proxyFastApi } from '@/lib/api/proxy'
 const AttachmentTypeSchema = z.enum(['image', 'document', 'screenshot'])
 
 const UploadUrlSchema = z.object({
+  threadId:       z.string().uuid(),
   projectId:      z.string().uuid(),
   filename:       z.string().min(1).max(255),
   mimeType:       z.string(),

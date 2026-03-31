@@ -37,9 +37,12 @@ from app.copilot.schemas import (
     CopilotMessage,
     CopilotThread,
     CreateAttachmentRequest,
+    CreateNoteRequest,
     CreateThreadRequest,
+    ProjectNote,
     SendMessageRequest,
     SendMessageResponse,
+    UpdateNoteRequest,
     UpdateThreadRequest,
     AttachmentUploadUrlRequest,
     AttachmentUploadUrlResponse,
@@ -247,25 +250,38 @@ async def get_attachment_upload_url(
 ) -> AttachmentUploadUrlResponse:
     """
     Creates an attachment metadata row and returns a Supabase Storage signed
-    upload URL. The client uploads directly to Storage, then calls
-    POST /attachments to confirm.
+    upload URL. The client uploads the file bytes directly to Storage using
+    the signed URL (PUT with Content-Type header), then the attachment row
+    is considered live and will be included in subsequent LLM turns.
 
-    TODO: The signed URL generation requires the Supabase service-role client's
-    storage API. Implement once the copilot-attachments bucket is created in
-    Supabase Storage.
+    Signed upload URLs bypass bucket RLS — no bucket policies are needed
+    for the upload path. The service-role key is used server-side to
+    generate the URL; the browser never sees the service-role key.
+
+    Requires:
+      - "copilot-attachments" bucket to exist in Supabase Storage
+        (Dashboard → Storage → New bucket, name: copilot-attachments)
+      - SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY set in backend .env
+
+    Returns HTTP 503 if the bucket is not yet created (storage API error),
+    with a clear message so the developer can action it.
     """
+    import uuid as _uuid
+
     # Verify thread ownership
     thread = await repo.get_thread(thread_id, UUID(user.user_id))
     if thread is None:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    import uuid as _uuid
     attachment_id = _uuid.uuid4()
+    # Storage path: copilot/<project_id>/<thread_id>/<attachment_id>/<filename>
+    # Scoped so per-project cleanup is trivial.
     storage_path = (
         f"copilot/{body.project_id}/{thread_id}/{attachment_id}/{body.filename}"
     )
 
-    # Create the metadata row
+    # Create the metadata row before generating the URL so we always have
+    # a record even if the URL generation fails (for debugging).
     att = await repo.create_attachment(
         thread_id=thread_id,
         project_id=body.project_id,
@@ -275,14 +291,32 @@ async def get_attachment_upload_url(
         storage_path=storage_path,
         mime_type=body.mime_type,
         file_size_bytes=body.file_size_bytes,
+        context_metadata={"upload_status": "pending"},
     )
 
-    # TODO: Generate real Supabase Storage signed URL once bucket exists.
-    # signed = await request.app.state.supabase.storage
-    #     .from_("copilot-attachments")
-    #     .create_signed_upload_url(storage_path)
-    # upload_url = signed["signedURL"]
-    upload_url = f"__TODO_STORAGE_SIGNED_URL__{storage_path}"
+    # Generate a Supabase Storage signed upload URL via the service-role client.
+    # The signed URL is time-limited (default 60 s) and authorises a single PUT.
+    # The browser uploads directly to Storage; the service-role key is never
+    # exposed to the client.
+    try:
+        signed = await request.app.state.supabase.storage.from_(
+            "copilot-attachments"
+        ).create_signed_upload_url(storage_path)
+        # supabase-py returns {"signedURL": "...", "path": "...", "token": "..."}
+        upload_url: str = signed["signedURL"]
+    except Exception as exc:
+        log.error(
+            "get_attachment_upload_url: Storage signed URL generation failed "
+            "(bucket 'copilot-attachments' may not exist): %s", exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Attachment storage is not configured. "
+                "Create the 'copilot-attachments' bucket in Supabase Storage "
+                "and ensure SUPABASE_SERVICE_ROLE_KEY is set."
+            ),
+        )
 
     return AttachmentUploadUrlResponse(
         upload_url=upload_url,
@@ -335,3 +369,109 @@ async def list_attachments(
         raise HTTPException(status_code=404, detail="Thread not found")
 
     return await repo.get_attachments_for_thread(thread_id)
+
+
+# ════════════════════════════════════════════════════════════
+# PROJECT NOTES
+# ════════════════════════════════════════════════════════════
+
+def _note_to_schema(note: dict) -> ProjectNote:
+    return ProjectNote.model_validate(note)
+
+
+@router.get(
+    "/projects/{project_id}/notes",
+    response_model=list[ProjectNote],
+    summary="List notes for a project",
+)
+async def list_notes(
+    project_id: UUID,
+    repo: RepoDep,
+    user: UserDep,
+    limit: int = 50,
+) -> list[ProjectNote]:
+    notes = await repo.list_project_notes(
+        project_id=project_id,
+        user_id=UUID(user.user_id),
+        limit=min(limit, 100),
+    )
+    return [_note_to_schema(n) for n in notes]
+
+
+@router.post(
+    "/projects/{project_id}/notes",
+    response_model=ProjectNote,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a project note",
+)
+async def create_note(
+    project_id: UUID,
+    body: CreateNoteRequest,
+    repo: RepoDep,
+    user: UserDep,
+) -> ProjectNote:
+    note = await repo.create_note(
+        project_id=project_id,
+        user_id=UUID(user.user_id),
+        title=body.title,
+        content=body.content,
+        pinned=body.pinned,
+        source_type=body.source_type.value,
+        source_message_id=body.source_message_id,
+    )
+    return _note_to_schema(note)
+
+
+@router.get(
+    "/notes/{note_id}",
+    response_model=ProjectNote,
+    summary="Get a single project note",
+)
+async def get_note(
+    note_id: UUID,
+    repo: RepoDep,
+    user: UserDep,
+) -> ProjectNote:
+    # Fetch via update with no changes to get the row (and verify ownership)
+    note = await repo.update_note(note_id, UUID(user.user_id))
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return _note_to_schema(note)
+
+
+@router.patch(
+    "/notes/{note_id}",
+    response_model=ProjectNote,
+    summary="Update a project note",
+)
+async def update_note(
+    note_id: UUID,
+    body: UpdateNoteRequest,
+    repo: RepoDep,
+    user: UserDep,
+) -> ProjectNote:
+    note = await repo.update_note(
+        note_id=note_id,
+        user_id=UUID(user.user_id),
+        title=body.title,
+        content=body.content,
+        pinned=body.pinned,
+    )
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return _note_to_schema(note)
+
+
+@router.delete(
+    "/notes/{note_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a project note",
+)
+async def delete_note(
+    note_id: UUID,
+    repo: RepoDep,
+    user: UserDep,
+) -> None:
+    deleted = await repo.delete_note(note_id, UUID(user.user_id))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Note not found")

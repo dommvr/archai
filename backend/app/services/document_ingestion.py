@@ -214,21 +214,220 @@ class DocumentIngestionService:
 
     # ── embed_chunks ──────────────────────────────────────────
 
-    async def embed_chunks(self, chunks: list[DocumentChunk]) -> None:
+    async def embed_chunks(self, chunks: list[DocumentChunk]) -> int:
         """
-        Generates and stores vector embeddings for the given chunks.
+        Generates OpenAI embeddings for chunks and persists them to Supabase.
 
-        TODO: Implement when OpenAI key + pgvector migration are ready:
-          1. Batch text through OpenAI text-embedding-3-small
-          2. ALTER TABLE document_chunks ADD COLUMN embedding vector(1536)
-          3. UPDATE document_chunks SET embedding = $1 WHERE id = $2
-          4. Create HNSW index: CREATE INDEX ... USING hnsw (embedding vector_cosine_ops)
+        Uses text-embedding-3-small (1536 dims) in batches of
+        settings.embedding_batch_size to stay within API limits.
 
-        Once embeddings exist, the rule extraction service can use semantic
-        similarity search to locate relevant clauses in large zoning codes.
+        Requires:
+          - OPENAI_API_KEY set in .env
+          - Migration 20240301000016 applied (embedding vector(1536) column)
+
+        Returns the number of chunks successfully embedded.
+        Degrades gracefully: if OpenAI is unavailable, logs a warning and
+        returns 0. The rest of the ingestion pipeline is not affected.
         """
-        # TODO: OpenAI + pgvector integration
-        log.info("embed_chunks: TODO — %d chunks not yet embedded", len(chunks))
+        if not settings.openai_api_key:
+            log.info(
+                "embed_chunks: OPENAI_API_KEY not set — skipping %d chunks",
+                len(chunks),
+            )
+            return 0
+
+        if not chunks:
+            return 0
+
+        try:
+            from openai import AsyncOpenAI  # import here to avoid hard dep at startup
+        except ImportError:
+            log.warning("embed_chunks: openai package not installed — skipping")
+            return 0
+
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        batch_size = settings.embedding_batch_size
+        embedded_count = 0
+
+        for batch_start in range(0, len(chunks), batch_size):
+            batch = chunks[batch_start: batch_start + batch_size]
+            texts = [c.text for c in batch]
+
+            try:
+                response = await client.embeddings.create(
+                    model=settings.embedding_model,
+                    input=texts,
+                    dimensions=settings.embedding_dimensions,
+                )
+            except Exception as exc:
+                log.error(
+                    "embed_chunks: OpenAI batch %d–%d failed: %s",
+                    batch_start, batch_start + len(batch), exc,
+                )
+                continue
+
+            # Persist each embedding as a list-of-floats update
+            updates = [
+                {"id": str(chunk.id), "embedding": data.embedding}
+                for chunk, data in zip(batch, response.data, strict=True)
+            ]
+
+            try:
+                await self._repo.update_chunk_embeddings_bulk(updates)
+                embedded_count += len(batch)
+                log.debug(
+                    "embed_chunks: embedded batch %d–%d (doc=%s)",
+                    batch_start, batch_start + len(batch),
+                    batch[0].document_id if batch else "?",
+                )
+            except Exception as exc:
+                log.error(
+                    "embed_chunks: failed to persist batch %d–%d: %s",
+                    batch_start, batch_start + len(batch), exc,
+                )
+
+        log.info(
+            "embed_chunks: %d/%d chunks embedded (model=%s dims=%d)",
+            embedded_count, len(chunks),
+            settings.embedding_model, settings.embedding_dimensions,
+        )
+        return embedded_count
+
+    # ── re_embed_chunks ───────────────────────────────────────
+
+    async def re_embed_chunks(
+        self,
+        chunks: list[DocumentChunk],
+        *,
+        force: bool = False,
+        scope_label: str = "unknown",
+    ) -> tuple[int, int, int]:
+        """
+        Regenerate embeddings for a pre-fetched list of DocumentChunk objects.
+
+        Differences from embed_chunks():
+          - embed_chunks() is called during normal ingestion and always
+            overwrites because the chunks are brand-new rows.
+          - re_embed_chunks() is called on EXISTING chunks during maintenance
+            / targeted reprocessing.  When force=False it skips chunks that
+            already have an embedding, making re-runs safe and idempotent.
+
+        Parameters:
+          chunks      — the target chunks (already fetched by the caller)
+          force       — if True, re-embed every chunk even if embedding exists
+          scope_label — human-readable label used only in log output
+                        (e.g. "project=abc123" or "document=def456")
+
+        Returns (embedded, skipped, failed) counts.
+
+        Diagnostics logged at INFO level:
+          - scope and total chunk count
+          - batch size used
+          - embedding model + dimensions
+          - per-batch progress
+          - final counts: embedded / skipped / failed
+        """
+        if not settings.openai_api_key:
+            log.warning(
+                "re_embed_chunks: OPENAI_API_KEY not set — "
+                "cannot re-embed %d chunks for %s",
+                len(chunks), scope_label,
+            )
+            return 0, 0, len(chunks)
+
+        if not chunks:
+            log.info("re_embed_chunks: no chunks to process for %s", scope_label)
+            return 0, 0, 0
+
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            log.warning("re_embed_chunks: openai package not installed — skipping")
+            return 0, 0, len(chunks)
+
+        # Split into chunks-to-embed vs chunks-to-skip
+        if force:
+            targets = chunks
+            skipped_count = 0
+            log.info(
+                "re_embed_chunks [%s]: force=True — re-embedding all %d chunks "
+                "(model=%s dims=%d)",
+                scope_label, len(chunks),
+                settings.embedding_model, settings.embedding_dimensions,
+            )
+        else:
+            targets = [c for c in chunks if c.embedding is None]
+            skipped_count = len(chunks) - len(targets)
+            log.info(
+                "re_embed_chunks [%s]: %d chunks total, %d already embedded (skipping), "
+                "%d to re-embed (model=%s dims=%d)",
+                scope_label, len(chunks), skipped_count, len(targets),
+                settings.embedding_model, settings.embedding_dimensions,
+            )
+
+        if not targets:
+            log.info(
+                "re_embed_chunks [%s]: nothing to do — all %d chunks already embedded",
+                scope_label, len(chunks),
+            )
+            return 0, skipped_count, 0
+
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        batch_size = settings.embedding_batch_size
+        embedded_count = 0
+        failed_count = 0
+
+        log.info(
+            "re_embed_chunks [%s]: processing %d chunks in batches of %d",
+            scope_label, len(targets), batch_size,
+        )
+
+        for batch_start in range(0, len(targets), batch_size):
+            batch = targets[batch_start: batch_start + batch_size]
+            texts = [c.text for c in batch]
+
+            try:
+                response = await client.embeddings.create(
+                    model=settings.embedding_model,
+                    input=texts,
+                    dimensions=settings.embedding_dimensions,
+                )
+            except Exception as exc:
+                log.error(
+                    "re_embed_chunks [%s]: OpenAI batch %d–%d failed: %s",
+                    scope_label, batch_start, batch_start + len(batch), exc,
+                )
+                failed_count += len(batch)
+                continue
+
+            updates = [
+                {"id": str(chunk.id), "embedding": data.embedding}
+                for chunk, data in zip(batch, response.data, strict=True)
+            ]
+
+            try:
+                await self._repo.update_chunk_embeddings_bulk(updates)
+                embedded_count += len(batch)
+                log.info(
+                    "re_embed_chunks [%s]: batch %d–%d embedded (%d/%d done)",
+                    scope_label,
+                    batch_start + 1, batch_start + len(batch),
+                    embedded_count, len(targets),
+                )
+            except Exception as exc:
+                log.error(
+                    "re_embed_chunks [%s]: failed to persist batch %d–%d: %s",
+                    scope_label, batch_start, batch_start + len(batch), exc,
+                )
+                failed_count += len(batch)
+
+        log.info(
+            "re_embed_chunks [%s]: COMPLETE — embedded=%d skipped=%d failed=%d "
+            "(model=%s dims=%d)",
+            scope_label, embedded_count, skipped_count, failed_count,
+            settings.embedding_model, settings.embedding_dimensions,
+        )
+        return embedded_count, skipped_count, failed_count
 
     # ── delete_from_storage ───────────────────────────────────
 
@@ -249,12 +448,17 @@ class DocumentIngestionService:
 
     async def process_document(self, doc: UploadedDocument) -> list[DocumentChunk]:
         """
-        Convenience method: extract → chunk → store for a single document.
-        embed_chunks is called separately since it is a network-heavy step.
+        Full pipeline: extract → chunk → store → embed.
+
+        embed_chunks() is called at the end so that newly stored chunks
+        are immediately searchable via pgvector.  If OPENAI_API_KEY is not
+        set, the embed step is a no-op and the pipeline still completes.
         """
-        text   = await self.extract_text(doc.storage_path)
-        rows   = await self.chunk_document(doc.id, text)
-        stored = await self.store_chunks(rows)
+        text    = await self.extract_text(doc.storage_path)
+        rows    = await self.chunk_document(doc.id, text)
+        stored  = await self.store_chunks(rows)
+        if stored:
+            await self.embed_chunks(stored)
         return stored
 
 

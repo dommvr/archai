@@ -182,6 +182,7 @@ export function CopilotPanel({ projectId, uiContext }: CopilotPanelProps) {
                 messages={copilot.messages}
                 loading={copilot.messagesLoading}
                 sending={copilot.sending}
+                onPinToNotes={copilot.pinToNotes}
               />
             )
           ) : (

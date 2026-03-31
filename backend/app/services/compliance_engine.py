@@ -26,6 +26,7 @@ from app.core.schemas import (
     CheckResultStatus,
     ComplianceCheck,
     ComplianceIssue,
+    ComplianceRunSummary,
     ExtractedRule,
     GeometrySnapshot,
     GetRunDetailsResponse,
@@ -35,6 +36,7 @@ from app.core.schemas import (
     PrecheckRun,
     ProjectExtractionOptions,
     RuleOperator,
+    RuleSourceKind,
     RuleStatus,
     ScoreContext,
     SiteContext,
@@ -101,17 +103,39 @@ class ComplianceEngineService:
 
         auto_apply = options.rule_auto_apply_enabled if options else False
 
-        # Apply authority filter:
-        # When auto_apply is off (default), only authoritative rules drive compliance.
-        # Advisory rules are still returned so the UI can display them with a
-        # "review required" indicator — but the compliance engine marks their
-        # checks as ambiguous unless is_authoritative is True.
-        # When auto_apply is on, auto_approved rules are also authoritative.
+        # Authority filter — only rules that drive compliance are evaluated.
+        # Non-authoritative (draft, low-confidence) rules are excluded here so
+        # the evaluator never produces AMBIGUOUS checks for advisory rules.
+        # The UI displays all rules independently; only this subset is evaluated.
+        #
+        # Authoritative rule set:
+        #   1. Manual rules (source_kind='manual') — always authoritative.
+        #   2. Approved / reviewed / auto_approved rules — always authoritative.
+        #   3. When auto_apply is enabled, auto_approved rules are included
+        #      (they already are by is_authoritative=True on those rows).
+        #   4. Draft rules with is_authoritative=True — included (edge case:
+        #      admin override). Draft rules with is_authoritative=False are
+        #      advisory only and EXCLUDED from compliance evaluation.
+        _AUTHORITATIVE_STATUSES = {
+            RuleStatus.APPROVED,
+            RuleStatus.REVIEWED,
+            RuleStatus.AUTO_APPROVED,
+        }
+
         applicable: list[ExtractedRule] = []
         for rule in all_rules:
-            if rule.status in {RuleStatus.REJECTED}:
-                continue  # already excluded by get_rules_for_run, but be explicit
-            applicable.append(rule)
+            # Manually skipping REJECTED is belt-and-suspenders; get_rules_for_run
+            # already strips them, but guard against future query changes.
+            if rule.status == RuleStatus.REJECTED:
+                continue
+            if rule.source_kind == RuleSourceKind.MANUAL:
+                applicable.append(rule)
+            elif rule.status in _AUTHORITATIVE_STATUSES:
+                applicable.append(rule)
+            elif rule.is_authoritative:
+                # Draft rule with an explicit admin override flag
+                applicable.append(rule)
+            # else: draft / superseded without authoritative flag → excluded
 
         log.info(
             "Selected %d/%d rules for run=%s (auto_apply=%s, jurisdiction=%r, zone=%r)",
@@ -144,26 +168,41 @@ class ComplianceEngineService:
         rules: list[ExtractedRule],
         metric_map: dict[MetricKey, float],
         snapshot: GeometrySnapshot | None,
-    ) -> list[ComplianceCheck]:
+    ) -> tuple[list[ComplianceCheck], ComplianceRunSummary]:
         """
         Runs each rule through the deterministic evaluator.
-        Persists ComplianceCheck rows and returns them.
+        Persists ComplianceCheck rows and returns (checks, summary).
+
+        Only authoritative rules should reach this method — call
+        select_applicable_rules() first to enforce that invariant.
 
         This mirrors evaluateRule() in lib/precheck/rule-engine.ts exactly.
         """
         now = datetime.now(timezone.utc)
         check_rows: list[dict[str, Any]] = []
+        checks_pre_persist: list[ComplianceCheck] = []
 
         for rule in rules:
             check = _evaluate_single_rule(run_id=run_id, rule=rule, metric_map=metric_map, now=now)
+            checks_pre_persist.append(check)
             check_rows.append(_check_to_row(check))
 
         if not check_rows:
-            return []
+            summary = ComplianceRunSummary(
+                run_id=run_id,
+                total=0, passed=0, failed=0,
+                ambiguous=0, missing_input=0, not_evaluable=0,
+            )
+            return [], summary
 
         checks = await self._repo.create_checks_bulk(check_rows)
-        log.info("Evaluated %d rules for run=%s", len(checks), run_id)
-        return checks
+        summary = _build_run_summary(run_id, checks)
+        log.info(
+            "Evaluated %d rules for run=%s — pass=%d fail=%d ambiguous=%d missing=%d",
+            len(checks), run_id,
+            summary.passed, summary.failed, summary.ambiguous, summary.missing_input,
+        )
+        return checks, summary
 
     # ── generate_issues ───────────────────────────────────────
 
@@ -348,11 +387,17 @@ def _evaluate_single_rule(
 ) -> ComplianceCheck:
     """
     Pure function — no I/O. Returns a ComplianceCheck for one rule.
+
+    Callers are responsible for pre-filtering to authoritative rules via
+    select_applicable_rules().  This function still defends against
+    non-authoritative rows arriving here (pre-migration rows, admin
+    edge cases) by emitting AMBIGUOUS rather than a hard PASS/FAIL.
     """
     actual = metric_map.get(rule.metric_key)
 
     if actual is None:
         # Metric not available from geometry snapshot
+        metric_label = rule.metric_key.value.replace("_", " ").title()
         return ComplianceCheck(
             id=uuid4(),
             run_id=run_id,
@@ -364,14 +409,15 @@ def _evaluate_single_rule(
             expected_min=rule.value_min,
             expected_max=rule.value_max,
             units=rule.units,
+            explanation=(
+                f"{metric_label} could not be measured — "
+                "no geometry snapshot metric available for this key."
+            ),
             created_at=now,
         )
 
-    # Non-authoritative rules are advisory only — never drive a FAIL result.
-    # They are flagged AMBIGUOUS so the UI surfaces them under "needs review".
-    # This covers:
-    #   - DRAFT rules with low confidence (original V1 threshold < 0.6)
-    #   - Any rule where is_authoritative=False (auto_apply disabled, not yet approved)
+    # Non-authoritative rules that slip through are marked AMBIGUOUS.
+    # select_applicable_rules() should have excluded them, but guard defensively.
     is_authoritative = getattr(rule, "is_authoritative", None)
     if is_authoritative is False:
         return ComplianceCheck(
@@ -385,6 +431,10 @@ def _evaluate_single_rule(
             expected_min=rule.value_min,
             expected_max=rule.value_max,
             units=rule.units,
+            explanation=(
+                "Rule is advisory only (not yet approved). "
+                "Approve or manually create the rule to include it in evaluation."
+            ),
             created_at=now,
         )
 
@@ -402,6 +452,10 @@ def _evaluate_single_rule(
             expected_min=rule.value_min,
             expected_max=rule.value_max,
             units=rule.units,
+            explanation=(
+                f"Rule confidence {rule.confidence:.0%} is below the required threshold. "
+                "Review and approve the rule to include it in evaluation."
+            ),
             created_at=now,
         )
 
@@ -429,8 +483,13 @@ def _evaluate_single_rule(
 
     if passed is None:
         status = CheckResultStatus.AMBIGUOUS
+        explanation: str | None = (
+            "Rule operator or threshold values are incomplete — "
+            "cannot evaluate deterministically."
+        )
     else:
         status = CheckResultStatus.PASS if passed else CheckResultStatus.FAIL
+        explanation = _build_explanation(rule=rule, actual=actual, passed=passed)
 
     return ComplianceCheck(
         id=uuid4(),
@@ -443,6 +502,7 @@ def _evaluate_single_rule(
         expected_min=rule.value_min,
         expected_max=rule.value_max,
         units=rule.units,
+        explanation=explanation,
         created_at=now,
     )
 
@@ -597,6 +657,68 @@ def _is_applicable(applicability: Applicability, site: SiteContext) -> bool:
     return True
 
 
+def _build_explanation(rule: ExtractedRule, actual: float, passed: bool) -> str:
+    """
+    Produces a one-sentence human-readable explanation for a deterministic check.
+    Format mirrors the TS rule-engine comment style.
+    """
+    metric = rule.metric_key.value.replace("_", " ").title()
+    units  = f" {rule.units}" if rule.units else ""
+    val    = rule.value_number
+
+    if passed:
+        if rule.operator in {RuleOperator.LTE, RuleOperator.LT} and val is not None:
+            return f"{metric} {actual}{units} is within the maximum allowed {val}{units}."
+        if rule.operator in {RuleOperator.GTE, RuleOperator.GT} and val is not None:
+            return f"{metric} {actual}{units} meets the minimum required {val}{units}."
+        if rule.operator == RuleOperator.EQ and val is not None:
+            return f"{metric} {actual}{units} matches the required value of {val}{units}."
+        if rule.operator == RuleOperator.BETWEEN \
+                and rule.value_min is not None and rule.value_max is not None:
+            return (
+                f"{metric} {actual}{units} is within the required range "
+                f"{rule.value_min}–{rule.value_max}{units}."
+            )
+        return f"{metric} passes the compliance check."
+    else:
+        if rule.operator in {RuleOperator.LTE, RuleOperator.LT} and val is not None:
+            return (
+                f"{metric} {actual}{units} exceeds the maximum allowed {val}{units}."
+            )
+        if rule.operator in {RuleOperator.GTE, RuleOperator.GT} and val is not None:
+            return (
+                f"{metric} {actual}{units} is below the minimum required {val}{units}."
+            )
+        if rule.operator == RuleOperator.EQ and val is not None:
+            return (
+                f"{metric} {actual}{units} does not match the required value of {val}{units}."
+            )
+        if rule.operator == RuleOperator.BETWEEN \
+                and rule.value_min is not None and rule.value_max is not None:
+            return (
+                f"{metric} {actual}{units} falls outside the required range "
+                f"{rule.value_min}–{rule.value_max}{units}."
+            )
+        return f"{metric} fails the compliance check."
+
+
+def _build_run_summary(run_id: UUID, checks: list[ComplianceCheck]) -> ComplianceRunSummary:
+    passed = sum(1 for c in checks if c.status == CheckResultStatus.PASS)
+    failed = sum(1 for c in checks if c.status == CheckResultStatus.FAIL)
+    ambiguous = sum(1 for c in checks if c.status == CheckResultStatus.AMBIGUOUS)
+    missing = sum(1 for c in checks if c.status == CheckResultStatus.MISSING_INPUT)
+    not_evaluable = sum(1 for c in checks if c.status == CheckResultStatus.NOT_APPLICABLE)
+    return ComplianceRunSummary(
+        run_id=run_id,
+        total=len(checks),
+        passed=passed,
+        failed=failed,
+        ambiguous=ambiguous,
+        missing_input=missing,
+        not_evaluable=not_evaluable,
+    )
+
+
 def _check_to_row(check: ComplianceCheck) -> dict[str, Any]:
     return {
         "id":             str(check.id),
@@ -609,6 +731,7 @@ def _check_to_row(check: ComplianceCheck) -> dict[str, Any]:
         "expected_min":   check.expected_min,
         "expected_max":   check.expected_max,
         "units":          check.units,
+        "explanation":    check.explanation,
         "created_at":     check.created_at.isoformat(),
     }
 

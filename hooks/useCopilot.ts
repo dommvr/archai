@@ -20,6 +20,7 @@ import type {
   CopilotThread,
   CopilotMessage,
   CopilotUiContext,
+  CreateNotePayload,
 } from '@/types'
 
 // ── Last-active-thread persistence ─────────────────────────
@@ -78,6 +79,7 @@ export interface UseCopilotReturn {
   sending: boolean
   sendError: string | null
   createError: string | null
+  pinToNotes: (message: CopilotMessage) => Promise<void>
 }
 
 export function useCopilot({ projectId, uiContext }: UseCopilotOptions): UseCopilotReturn {
@@ -377,6 +379,40 @@ export function useCopilot({ projectId, uiContext }: UseCopilotOptions): UseCopi
     [activeThread, projectId, uiContext]
   )
 
+  // ── Pin assistant message as a project note ───────────────
+  const pinToNotes = useCallback(
+    async (message: CopilotMessage) => {
+      // Derive a title from the first sentence of the message content
+      const text = message.content.trim()
+      const firstSentenceEnd = Math.min(
+        ...['.', '?', '!', '\n'].map((sep) => {
+          const idx = text.indexOf(sep)
+          return idx > 0 ? idx + 1 : Number.MAX_SAFE_INTEGER
+        })
+      )
+      const title =
+        firstSentenceEnd < 80
+          ? text.slice(0, firstSentenceEnd).trim()
+          : text.slice(0, 80).trim() + '…'
+
+      const payload: CreateNotePayload = {
+        title,
+        content: message.content,
+        pinned: false,
+        sourceType: 'copilot',
+        sourceMessageId: message.id,
+      }
+
+      const res = await fetch(`/api/copilot/projects/${projectId}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) throw new Error(`Failed to save note (${res.status})`)
+    },
+    [projectId]
+  )
+
   return {
     threads,
     threadsLoading,
@@ -393,5 +429,6 @@ export function useCopilot({ projectId, uiContext }: UseCopilotOptions): UseCopi
     sending,
     sendError,
     createError,
+    pinToNotes,
   }
 }

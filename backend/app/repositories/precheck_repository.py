@@ -524,6 +524,107 @@ class PrecheckRepository:
         )
         return [DocumentChunk.model_validate(r) for r in (result.data or [])]
 
+    async def update_chunk_embeddings_bulk(
+        self, updates: list[dict[str, Any]]
+    ) -> None:
+        """
+        Persists embeddings for a batch of document_chunks.
+
+        Each item in `updates` must have:
+          { "id": str(uuid), "embedding": list[float] }
+
+        Uses individual UPDATEs via the Supabase client (no bulk-update API).
+        Embeddings are stored as the native vector(1536) type added in
+        migration 20240301000016.
+        """
+        for item in updates:
+            await (
+                self._db.table("document_chunks")
+                .update({"embedding": item["embedding"]})
+                .eq("id", item["id"])
+                .execute()
+            )
+        log.debug("update_chunk_embeddings_bulk: updated %d rows", len(updates))
+
+    async def get_chunks_without_embeddings(
+        self,
+        project_id: UUID,
+        limit: int = 500,
+    ) -> list[DocumentChunk]:
+        """
+        Returns chunks that have no embedding yet, scoped to a project.
+
+        Used by the backfill script to identify which chunks still need
+        to be embedded after migration 20240301000016.
+        Joins through uploaded_documents to filter by project_id.
+        """
+        # Fetch document IDs for this project
+        doc_result = (
+            await self._db.table("uploaded_documents")
+            .select("id")
+            .eq("project_id", str(project_id))
+            .execute()
+        )
+        if not doc_result.data:
+            return []
+        doc_ids = [r["id"] for r in doc_result.data]
+
+        result = (
+            await self._db.table("document_chunks")
+            .select("*")
+            .in_("document_id", doc_ids)
+            .is_("embedding", "null")
+            .order("document_id, chunk_index")
+            .limit(limit)
+            .execute()
+        )
+        return [DocumentChunk.model_validate(r) for r in (result.data or [])]
+
+    async def get_chunk_by_id(self, chunk_id: UUID) -> DocumentChunk | None:
+        """Returns a single chunk by primary key."""
+        result = (
+            await self._db.table("document_chunks")
+            .select("*")
+            .eq("id", str(chunk_id))
+            .maybe_single()
+            .execute()
+        )
+        return DocumentChunk.model_validate(result.data) if result.data else None
+
+    async def get_chunks_for_project(
+        self,
+        project_id: UUID,
+        limit: int = 2000,
+    ) -> list[DocumentChunk]:
+        """
+        Returns all chunks for a project (regardless of embedding status).
+
+        Used by re-embed operations that target an entire project.
+        Joins through uploaded_documents to resolve project_id.
+        The default limit of 2 000 protects against accidental full-table
+        scans on very large projects; pass a higher value explicitly when
+        processing in batches.
+        """
+        doc_result = (
+            await self._db.table("uploaded_documents")
+            .select("id")
+            .eq("project_id", str(project_id))
+            .execute()
+        )
+        if not doc_result.data:
+            return []
+        doc_ids = [r["id"] for r in doc_result.data]
+
+        result = (
+            await self._db.table("document_chunks")
+            .select("*")
+            .in_("document_id", doc_ids)
+            .order("document_id, chunk_index")
+            .limit(limit)
+            .execute()
+        )
+        return [DocumentChunk.model_validate(r) for r in (result.data or [])]
+
     # ── extracted_rules ───────────────────────────────────────
 
     async def create_rules_bulk(self, rows: list[dict[str, Any]]) -> list[ExtractedRule]:
@@ -561,21 +662,51 @@ class PrecheckRepository:
 
     async def get_rules_for_run(self, run_id: UUID) -> list[ExtractedRule]:
         """
-        Returns rules for all documents associated with this run.
-        Excludes rejected rules.
+        Returns rules for all documents associated with this run PLUS any
+        manual rules (source_kind='manual') scoped to the same project.
+
+        Manual rules have document_id=NULL so they never appear in a
+        document_id IN (...) query. They are fetched separately and merged.
+        Excludes rejected rules from both sets.
         """
         docs = await self.get_documents_for_run(run_id)
-        if not docs:
-            return []
-        doc_ids = [str(d.id) for d in docs]
-        result = (
+
+        # Fetch document-linked extracted rules (empty list when no docs yet).
+        doc_rules: list[ExtractedRule] = []
+        if docs:
+            doc_ids = [str(d.id) for d in docs]
+            result = (
+                await self._db.table("extracted_rules")
+                .select("*")
+                .in_("document_id", doc_ids)
+                .neq("status", RuleStatus.REJECTED.value)
+                .execute()
+            )
+            doc_rules = [ExtractedRule.model_validate(r) for r in (result.data or [])]
+
+        # Fetch manual rules for the project (always present, regardless of docs).
+        run = await self.get_run(run_id)
+        if run is None:
+            return doc_rules
+        manual_result = (
             await self._db.table("extracted_rules")
             .select("*")
-            .in_("document_id", doc_ids)
+            .eq("project_id", str(run.project_id))
+            .eq("source_kind", "manual")
             .neq("status", RuleStatus.REJECTED.value)
             .execute()
         )
-        return [ExtractedRule.model_validate(r) for r in (result.data or [])]
+        manual_rules = [ExtractedRule.model_validate(r) for r in (manual_result.data or [])]
+
+        # Merge, preserving order: extracted rules first, then manual.
+        # Dedup by id in case a manual rule somehow shares an id (shouldn't happen).
+        seen: set[str] = set()
+        combined: list[ExtractedRule] = []
+        for rule in doc_rules + manual_rules:
+            if str(rule.id) not in seen:
+                seen.add(str(rule.id))
+                combined.append(rule)
+        return combined
 
     async def update_rule_status(self, rule_id: UUID, status: RuleStatus) -> ExtractedRule:
         result = (
