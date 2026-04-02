@@ -21,6 +21,7 @@ Next.js integration mapping:
   POST /precheck/runs/{id}/sync-speckle-model   ← action: "sync_speckle_model"
   POST /precheck/runs/{id}/assign-model-ref     ← action: "assign_model_ref"
   POST /precheck/runs/{id}/assign-site-context  ← action: "assign_site_context"
+  POST /precheck/runs/{id}/compute-run-metrics  ← action: "compute_run_metrics"
   POST /precheck/runs/{id}/evaluate             ← action: "evaluate_compliance"
   GET  /projects/{id}/precheck-runs             ← GET /api/agents/precheck?projectId=
   GET  /projects/{id}/documents                 ← GET /api/agents/precheck?projectId=&scope=documents
@@ -67,6 +68,7 @@ from app.core.schemas import (
     AssignModelRefRequest,
     AssignSiteContextRequest,
     AsyncActionResponse,
+    CheckResultStatus,
     CreateManualRuleRequest,
     CreatePrecheckRunRequest,
     CreateProjectSiteContextRequest,
@@ -77,6 +79,7 @@ from app.core.schemas import (
     IngestSiteRequest,
     OkResponse,
     PrecheckRun,
+    PrecheckRunSummaryResponse,
     PrecheckRunStatus,
     ProjectDocumentsResponse,
     ProjectExtractionOptions,
@@ -97,7 +100,7 @@ from app.core.schemas import (
     UploadedDocument,
 )
 from app.repositories.precheck_repository import PrecheckRepository
-from app.services.compliance_engine import ComplianceEngineService
+from app.services.compliance_engine import ComplianceEngineService, compute_readiness_breakdown
 from app.services.document_ingestion import DocumentIngestionService
 from app.services.realtime_publisher import RealtimePublisher
 from app.services.rule_extraction import RuleExtractionService
@@ -163,6 +166,27 @@ async def get_run_details(
     issues     = await repo.get_issues_for_run(run_id)
     checklist  = await repo.get_checklist_for_run(run_id)
 
+    # Build readiness breakdown — same data as the evaluate pipeline uses, but
+    # computed fresh on every GET so the label + reasons are always consistent
+    # with the current issues list without requiring a re-run.
+    _AUTHORITATIVE_STATUSES = {"reviewed", "approved", "auto_approved", "manual"}
+    authoritative_rules = [r for r in rules if r.status.value in _AUTHORITATIVE_STATUSES]
+    has_reviewed = bool(authoritative_rules)
+    score_ctx = ScoreContext(
+        has_parcel_data=bool(site_context and site_context.parcel_area_m2),
+        has_zoning_data=bool(site_context and site_context.zoning_district),
+        has_reviewed_rules=has_reviewed,
+        has_geometry_snapshot=bool(snapshot),
+    )
+    resolved_count = sum(1 for c in checklist if c.resolved)
+    breakdown = compute_readiness_breakdown(
+        issues=issues,
+        context=score_ctx,
+        authoritative_rule_count=len(authoritative_rules),
+        checklist_total=len(checklist),
+        checklist_resolved=resolved_count,
+    )
+
     return GetRunDetailsResponse(
         run=run,
         site_context=site_context,
@@ -172,6 +196,77 @@ async def get_run_details(
         rules=rules,
         issues=issues,
         checklist=checklist,
+        readiness_breakdown=breakdown,
+    )
+
+
+# ════════════════════════════════════════════════════════════
+# GET /precheck/runs/{run_id}/summary
+# Lightweight summary for the right panel and Copilot tool use.
+# Returns readiness breakdown, checklist counts, issue counts —
+# without sending the full rules/documents/snapshot payload.
+# ════════════════════════════════════════════════════════════
+
+@router.get("/runs/{run_id}/summary", response_model=PrecheckRunSummaryResponse)
+async def get_run_summary(
+    run_id: UUID,
+    user:   AuthenticatedUser  = Depends(get_current_user),
+    repo:   PrecheckRepository = Depends(get_repository),
+) -> PrecheckRunSummaryResponse:
+    """
+    Returns a compact summary of a run suitable for the metrics panel and
+    Copilot get_metrics / get_checklist tools.
+    Maps to: lib/precheck/api.ts → getRunSummary()
+    """
+    run = await _require_run(repo, run_id)
+
+    site_context = (
+        await repo.get_site_context(run.site_context_id)
+        if run.site_context_id else None
+    )
+    snapshot  = await repo.get_latest_geometry_snapshot(run_id)
+    rules     = await repo.get_rules_for_run(run_id)
+    issues    = await repo.get_issues_for_run(run_id)
+    checklist = await repo.get_checklist_for_run(run_id)
+
+    _AUTHORITATIVE_STATUSES = {"reviewed", "approved", "auto_approved", "manual"}
+    authoritative_rules = [r for r in rules if r.status.value in _AUTHORITATIVE_STATUSES]
+    has_reviewed = bool(authoritative_rules)
+    score_ctx = ScoreContext(
+        has_parcel_data=bool(site_context and site_context.parcel_area_m2),
+        has_zoning_data=bool(site_context and site_context.zoning_district),
+        has_reviewed_rules=has_reviewed,
+        has_geometry_snapshot=bool(snapshot),
+    )
+    resolved_count = sum(1 for c in checklist if c.resolved)
+    breakdown = compute_readiness_breakdown(
+        issues=issues,
+        context=score_ctx,
+        authoritative_rule_count=len(authoritative_rules),
+        checklist_total=len(checklist),
+        checklist_resolved=resolved_count,
+    )
+
+    return PrecheckRunSummaryResponse(
+        run_id=run_id,
+        run_status=run.status,
+        readiness=breakdown,
+        authoritative_rule_count=len(authoritative_rules),
+        checklist_total=len(checklist),
+        checklist_resolved=resolved_count,
+        issue_total=len(issues),
+        issue_fail_count=sum(
+            1 for i in issues if i.status == CheckResultStatus.FAIL
+        ),
+        issue_warning_count=sum(
+            1 for i in issues
+            if i.status in {CheckResultStatus.AMBIGUOUS, CheckResultStatus.MISSING_INPUT}
+        ),
+        issue_missing_data_count=sum(
+            1 for i in issues if i.status == CheckResultStatus.MISSING_INPUT
+        ),
+        is_stale=run.is_stale,
+        rules_changed_at=run.rules_changed_at,
     )
 
 
@@ -241,7 +336,7 @@ async def ingest_documents(
     Processing runs in a BackgroundTask (non-blocking).
     Maps to: lib/precheck/api.ts → ingestDocuments()
     """
-    run = await _require_run(repo, run_id)
+    await _require_run(repo, run_id)
     await pub.publish_run_status(run_id, PrecheckRunStatus.INGESTING_DOCS, "Processing documents")
 
     async def _task() -> None:
@@ -545,6 +640,49 @@ async def assign_site_context(
 
 
 # ════════════════════════════════════════════════════════════
+# POST /precheck/runs/{run_id}/compute-run-metrics
+# Compute run-specific metrics (FAR, lot_coverage_pct) that require
+# both model geometry and site context parcel area. Persists result
+# to precheck_runs.run_metrics. Synchronous — returns updated run.
+# ════════════════════════════════════════════════════════════
+
+@router.post("/runs/{run_id}/compute-run-metrics", response_model=PrecheckRun)
+async def compute_run_metrics(
+    run_id:  UUID,
+    user:    AuthenticatedUser  = Depends(get_current_user),
+    repo:    PrecheckRepository = Depends(get_repository),
+    speckle: SpeckleService     = Depends(get_speckle_service),
+) -> PrecheckRun:
+    """
+    Derives FAR and lot_coverage_pct from the run's geometry snapshot and
+    site context, then persists them to precheck_runs.run_metrics.
+
+    Requires:
+      - run has a geometry snapshot (model synced)
+      - run has a site context with parcel_area_m2
+
+    Returns the updated PrecheckRun with run_metrics populated.
+    Maps to: lib/precheck/api.ts → computeRunMetrics()
+             Next.js seam: action "compute_run_metrics"
+    """
+    run = await _require_run(repo, run_id)
+
+    try:
+        run_metrics = await speckle.compute_run_metrics(run)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    updated_run = await repo.update_run_run_metrics(run_id, run_metrics)
+    log.info(
+        "Run %s run_metrics computed: FAR=%s parcel=%.1f m²",
+        run_id,
+        run_metrics.get("far"),
+        run_metrics.get("parcel_area_m2", 0),
+    )
+    return updated_run
+
+
+# ════════════════════════════════════════════════════════════
 # POST /precheck/runs/{run_id}/evaluate
 # Run compliance evaluation + generate score, issues, checklist.
 # ════════════════════════════════════════════════════════════
@@ -575,6 +713,10 @@ async def evaluate_compliance(
 
     async def _task() -> None:
         try:
+            # Clear the stale flag immediately so the UI stops showing the
+            # "rerun required" banner as soon as evaluation starts.
+            await repo.clear_run_stale(run_id)
+
             # Idempotency: clear any evaluation data from a previous run of this
             # endpoint. compliance_checks has a unique(run_id, rule_id) constraint,
             # so re-evaluation without this cleanup would raise a constraint violation.
@@ -597,16 +739,21 @@ async def evaluate_compliance(
             rules = await engine.select_applicable_rules(run_id, site_context, options)
 
             # ── Build metric map ───────────────────────────────
+            # Re-fetch run inside the task to pick up any run_metrics that were
+            # computed after the endpoint was called (e.g. compute-run-metrics).
+            current_run = await repo.get_run(run_id)
             metric_map = {}
             if snapshot:
-                metric_map = await engine.resolve_metrics(snapshot)
+                metric_map = await engine.resolve_metrics(snapshot, current_run)
 
             # ── Deterministic evaluation ───────────────────────
             checks, _run_summary = await engine.evaluate_rules(run_id, rules, metric_map, snapshot)
 
             # ── Generate issues ────────────────────────────────
             rules_by_id = {r.id: r for r in rules}
-            issues = await engine.generate_issues(run_id, checks, rules_by_id)
+            issues = await engine.generate_issues(
+                run_id, checks, rules_by_id, project_id=run.project_id
+            )
 
             # ── Score context ──────────────────────────────────
             # A rule counts as "reviewed" if it has been explicitly approved or
@@ -1252,6 +1399,39 @@ async def approve_rule(
 
 
 # ════════════════════════════════════════════════════════════
+# POST /precheck/rules/{rule_id}/unapprove
+# Return an approved rule to draft (non-authoritative) status.
+# The rule is NOT deleted — it stays visible for re-approval.
+# ════════════════════════════════════════════════════════════
+
+@router.post("/rules/{rule_id}/unapprove", response_model=ExtractedRule)
+async def unapprove_rule(
+    rule_id: UUID,
+    user:    AuthenticatedUser    = Depends(get_current_user),
+    svc:     RuleExtractionService = Depends(get_rule_extraction),
+) -> ExtractedRule:
+    """
+    Returns an approved/reviewed rule to draft status (non-authoritative).
+    Marks all evaluated project runs as stale so the UI prompts a rerun.
+    Manual rules cannot be unapproved — raise 422 instead.
+    Maps to: lib/precheck/api.ts → unapproveRule()
+             Next.js seam: action "unapprove_rule"
+    """
+    try:
+        rule = await svc.unapprove_rule(rule_id)
+    except ValueError as exc:
+        msg = str(exc)
+        code = (
+            status.HTTP_422_UNPROCESSABLE_ENTITY
+            if "manual rule" in msg
+            else status.HTTP_404_NOT_FOUND
+        )
+        raise HTTPException(code, detail=msg) from exc
+    log.info("Rule %s unapproved by user=%s", rule_id, user.user_id)
+    return rule
+
+
+# ════════════════════════════════════════════════════════════
 # POST /precheck/rules/{rule_id}/reject
 # Mark an extracted rule as rejected (excluded from compliance).
 # ════════════════════════════════════════════════════════════
@@ -1264,6 +1444,7 @@ async def reject_rule(
 ) -> ExtractedRule:
     """
     Sets the rule status to 'rejected' and is_authoritative=False.
+    Also marks evaluated project runs as stale.
     Maps to: lib/precheck/api.ts → rejectRule()
              Next.js seam: action "reject_rule"
     """

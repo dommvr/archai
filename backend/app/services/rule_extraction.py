@@ -404,6 +404,22 @@ class RuleExtractionService:
         }
         return await self._repo.update_rule(rule_id, patch)
 
+    # ── _mark_project_stale ───────────────────────────────────
+
+    async def _mark_project_stale(self, project_id: UUID) -> None:
+        """
+        Called after any rule approval-state change.  Sets is_stale=True on
+        all evaluated runs in the project so the UI can surface a "rerun
+        required" banner.  Best-effort: failures are logged, not raised.
+        """
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            await self._repo.mark_run_stale(project_id, now)
+        except Exception:
+            log.exception(
+                "Failed to mark project=%s runs as stale after rule change", project_id
+            )
+
     # ── approve_rule ──────────────────────────────────────────
 
     async def approve_rule(self, rule_id: UUID) -> ExtractedRule:
@@ -411,6 +427,8 @@ class RuleExtractionService:
         Marks a rule as approved (authoritative).
         If the rule is part of a conflict group, clears is_recommended
         on siblings so this rule becomes the sole recommended choice.
+        Also marks all evaluated runs for the project as stale so the UI
+        prompts the user to rerun compliance.
         """
         rule = await self._repo.get_rule_by_id(rule_id)
         if rule is None:
@@ -427,13 +445,47 @@ class RuleExtractionService:
             )
             await self._repo.update_rule(rule_id, {"is_recommended": True})
 
+        await self._mark_project_stale(rule.project_id)
+        return updated
+
+    # ── unapprove_rule ────────────────────────────────────────
+
+    async def unapprove_rule(self, rule_id: UUID) -> ExtractedRule:
+        """
+        Returns an approved/reviewed rule back to draft status (non-authoritative).
+
+        This is the inverse of approve_rule.  The rule is NOT deleted — it
+        remains visible in the rules panel in the "Draft / pending review"
+        section where it can be re-approved or rejected.
+
+        Manual rules (source_kind='manual') are always authoritative and
+        cannot be unapproved; call delete instead if a manual rule is wrong.
+        """
+        rule = await self._repo.get_rule_by_id(rule_id)
+        if rule is None:
+            raise ValueError(f"Rule {rule_id} not found")
+        if rule.source_kind == RuleSourceKind.MANUAL:
+            raise ValueError(
+                f"Rule {rule_id} is a manual rule — manual rules cannot be "
+                "unapproved. Delete the rule if it should not be used."
+            )
+        updated = await self.mark_rule_status(rule_id, RuleStatus.DRAFT)
+        await self._mark_project_stale(rule.project_id)
         return updated
 
     # ── reject_rule ───────────────────────────────────────────
 
     async def reject_rule(self, rule_id: UUID) -> ExtractedRule:
-        """Marks a rule as rejected (non-authoritative, excluded from evaluation)."""
-        return await self.mark_rule_status(rule_id, RuleStatus.REJECTED)
+        """
+        Marks a rule as rejected (non-authoritative, excluded from evaluation).
+        Also marks evaluated runs for the project as stale.
+        """
+        rule = await self._repo.get_rule_by_id(rule_id)
+        if rule is None:
+            raise ValueError(f"Rule {rule_id} not found")
+        updated = await self.mark_rule_status(rule_id, RuleStatus.REJECTED)
+        await self._mark_project_stale(rule.project_id)
+        return updated
 
     # ── create_manual_rule ────────────────────────────────────
 

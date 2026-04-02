@@ -4,6 +4,7 @@ import {
   ApproveRuleInputSchema,
   AssignModelRefInputSchema,
   AssignSiteContextInputSchema,
+  ComputeRunMetricsInputSchema,
   CreateProjectSiteContextInputSchema,
   DeleteProjectSiteContextInputSchema,
   ComplianceCheckSchema,
@@ -22,6 +23,7 @@ import {
   IngestSiteInputSchema,
   PermitChecklistItemSchema,
   PrecheckRunSchema,
+  PrecheckRunSummaryResponseSchema,
   DeleteProjectModelInputSchema,
   ProjectActiveModelResponseSchema,
   ProjectDefaultSiteContextResponseSchema,
@@ -30,6 +32,8 @@ import {
   ProjectModelRefsResponseSchema,
   ProjectRunsResponseSchema,
   ProjectSiteContextsResponseSchema,
+  ReadinessBreakdownSchema,
+  ReadinessReasonSchema,
   RegisterDocumentInputSchema,
   RegisterProjectDocumentInputSchema,
   RejectRuleInputSchema,
@@ -84,6 +88,10 @@ export type ProjectDefaultSiteContextResponse = z.infer<typeof ProjectDefaultSit
 export type ProjectExtractionOptions = z.infer<typeof ProjectExtractionOptionsSchema>
 export type SetProjectExtractionOptionsInput = z.infer<typeof SetProjectExtractionOptionsInputSchema>
 export type ApproveRuleInput = z.infer<typeof ApproveRuleInputSchema>
+export type ComputeRunMetricsInput = z.infer<typeof ComputeRunMetricsInputSchema>
 export type RejectRuleInput = z.infer<typeof RejectRuleInputSchema>
 export type CreateManualRuleInput = z.infer<typeof CreateManualRuleInputSchema>
 export type UpdateManualRuleInput = z.infer<typeof UpdateManualRuleInputSchema>
+export type ReadinessReason = z.infer<typeof ReadinessReasonSchema>
+export type ReadinessBreakdown = z.infer<typeof ReadinessBreakdownSchema>
+export type PrecheckRunSummaryResponse = z.infer<typeof PrecheckRunSummaryResponseSchema>

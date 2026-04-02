@@ -92,6 +92,14 @@ class CopilotService:
         for att_id in attachment_ids:
             await self._repo.link_attachment_to_message(att_id, user_msg.id)
 
+        # Populate attachments on the user message so SendMessageResponse
+        # includes them with signed read URLs — same shape as list_messages returns,
+        # so the frontend renders image thumbnails immediately after send.
+        if attachment_ids:
+            user_msg.attachments = await self._repo.get_attachments_by_ids_resolved(
+                attachment_ids
+            )
+
         # ── 2. Build context ──────────────────────────────────
         ctx = await self._ctx_builder.build(
             project_id=project_id,
@@ -398,60 +406,82 @@ def _build_user_message_content(
     Build the `content` field for the final user message in the Responses API
     input list.
 
-    If there are no attachments, returns the text string directly (simplest form).
+    Returns a plain string when there are no attachments (simplest form
+    accepted by the API).  Returns a multi-part content list otherwise.
 
-    If images or screenshots are attached and their signed URLs were resolved,
-    returns a multi-part content list with text + image_url blocks.  This is
-    the format required by the Responses API for vision input.
+    Responses API content item types used here:
+      input_text  — plain text (required when mixing text with other items)
+      input_image — image supplied via URL; fields: type, image_url, detail
+      input_file  — document supplied via URL; fields: type, file_url, filename
 
-    Non-image attachments (documents) are acknowledged in a short text note
-    appended to the user text so the model knows they exist, but their raw
-    bytes are not submitted (content extraction is a TODO).
+    References:
+      ResponseInputImage  → type="input_image", image_url, detail
+      ResponseInputFile   → type="input_file",  file_url,  filename
+      (from openai.types.responses.response_input_{image,file})
 
-    Attachments whose signed_url is None (Storage not configured or file not
-    found) are mentioned as a note so the model can explain the limitation.
+    Attachments with no signed_url (Storage not configured, file missing) are
+    converted to a plain text note so the model can explain the limitation
+    without crashing the whole request.
     """
     if not attachments:
         return text
 
-    # Collect image blocks and build a notes string for non-image / unavailable
-    image_blocks: list[dict[str, Any]] = []
-    doc_notes: list[str] = []
+    media_blocks: list[dict[str, Any]] = []
+    fallback_notes: list[str] = []
 
     for att in attachments:
-        if att.is_image and att.signed_url:
-            image_blocks.append({
-                "type": "image_url",
-                "image_url": {"url": att.signed_url},
+        if not att.signed_url:
+            # Storage unavailable for this attachment — note it in text
+            fallback_notes.append(
+                f"[Attachment {att.filename!r} could not be loaded "
+                "— Storage may not be configured or the file was not found]"
+            )
+            log.warning(
+                "_build_user_message_content: no signed URL "
+                "filename=%r type=%s — falling back to text note",
+                att.filename, att.attachment_type,
+            )
+            continue
+
+        if att.is_image:
+            # Responses API: type="input_image", image_url=<str>, detail="auto"
+            media_blocks.append({
+                "type":      "input_image",
+                "image_url": att.signed_url,
+                "detail":    "auto",
             })
-        elif att.is_image and not att.signed_url:
-            doc_notes.append(
-                f"[Image attached: {att.filename!r} — "
-                "file not accessible this turn; Storage may not be configured]"
+            log.debug(
+                "_build_user_message_content: added input_image block "
+                "filename=%r mime=%s",
+                att.filename, att.mime_type,
             )
         else:
-            # Non-image document
-            doc_notes.append(
-                f"[File attached: {att.filename!r} "
-                f"(type: {att.mime_type or att.attachment_type}) — "
-                "content not extracted; refer to the attachment by name if needed]"
+            # Non-image document — use input_file with file_url
+            media_blocks.append({
+                "type":     "input_file",
+                "file_url": att.signed_url,
+                "filename": att.filename,
+            })
+            log.debug(
+                "_build_user_message_content: added input_file block "
+                "filename=%r mime=%s",
+                att.filename, att.mime_type,
             )
 
-    if not image_blocks and not doc_notes:
+    if not media_blocks and not fallback_notes:
         return text
 
-    # Compose the full user content
     full_text = text
-    if doc_notes:
-        full_text = text + "\n\n" + "\n".join(doc_notes)
+    if fallback_notes:
+        full_text = text + "\n\n" + "\n".join(fallback_notes)
 
-    if not image_blocks:
-        # Only document notes — plain string is fine
+    if not media_blocks:
+        # Only fallback notes, no actual media — plain string is fine
         return full_text
 
-    # Multi-part: text first, then image blocks
+    # Multi-part content list: text block first, then media blocks
     content: list[dict[str, Any]] = [{"type": "input_text", "text": full_text}]
-    content.extend(image_blocks)
+    content.extend(media_blocks)
     return content
 
 

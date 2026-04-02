@@ -302,7 +302,6 @@ class SpeckleService:
         """
         now = datetime.now(timezone.utc)
         objects = await self.fetch_version_objects(model_ref.stream_id, model_ref.version_id)
-        parcel_area_m2 = site_context.parcel_area_m2 if site_context else None
 
         # ── Run normalization pipeline ────────────────────────
         if not objects:
@@ -316,7 +315,7 @@ class SpeckleService:
             # Stage 3.5 — unit detection, conversion, and plausibility check.
             # Converts IFC/generic candidates to metric in-place before aggregation.
             candidates, unit_report = detect_and_normalize_units(candidates, all_elements)
-            metrics, derivation_diagnostics = _derive_metrics_from_candidates(candidates, parcel_area_m2)
+            metrics, derivation_diagnostics = _derive_metrics_from_candidates(candidates)
 
         # ── Build raw_metrics debug blob ────────────────────────────────────────
         if not objects:
@@ -491,7 +490,6 @@ class SpeckleService:
 
         now = datetime.now(timezone.utc)
         objects = await self.fetch_version_objects(model_ref.stream_id, model_ref.version_id)
-        parcel_area_m2 = site_context.parcel_area_m2 if site_context else None
 
         if not objects:
             metrics: list[GeometrySnapshotMetric] = []
@@ -509,9 +507,7 @@ class SpeckleService:
             all_elements = _get_elements_from_objects(objects)
             candidates = _normalize_elements(all_elements)
             candidates, unit_report = detect_and_normalize_units(candidates, all_elements)
-            metrics, derivation_diagnostics = _derive_metrics_from_candidates(
-                candidates, parcel_area_m2
-            )
+            metrics, derivation_diagnostics = _derive_metrics_from_candidates(candidates)
             debug = objects.get("__debug", {})
             raw_metrics = {
                 "fetch_skipped": False,
@@ -561,6 +557,83 @@ class SpeckleService:
             snapshot.id, model_ref.id, len(metrics), now.isoformat(),
         )
         return snapshot
+
+    async def compute_run_metrics(
+        self,
+        run: "PrecheckRun",
+    ) -> dict[str, Any]:
+        """
+        Computes run-specific metrics (FAR, lot_coverage_pct) that require both
+        model geometry data and the run's site context parcel_area_m2.
+
+        Returns a dict suitable for storing in precheck_runs.run_metrics.
+        The caller is responsible for persisting the result via the repository.
+
+        Raises ValueError if the run has no geometry snapshot or no site context.
+        """
+        from app.core.schemas import MetricKey as MK
+
+        if not run.site_context_id:
+            raise ValueError(
+                f"run {run.id} has no site_context assigned — "
+                "assign a site context before computing run metrics"
+            )
+
+        site_context = await self._repo.get_site_context(run.site_context_id)
+        if not site_context:
+            raise ValueError(
+                f"run {run.id} references site_context_id={run.site_context_id} "
+                "but that record no longer exists"
+            )
+
+        if not site_context.parcel_area_m2:
+            raise ValueError(
+                f"run {run.id} site_context {run.site_context_id} has no parcel_area_m2 — "
+                "cannot compute FAR without parcel area"
+            )
+
+        parcel_area_m2: float = site_context.parcel_area_m2
+
+        # Fetch the snapshot for this run
+        snapshot = await self._repo.get_latest_geometry_snapshot(run.id)
+        if not snapshot:
+            raise ValueError(
+                f"run {run.id} has no geometry snapshot — "
+                "sync model before computing run metrics"
+            )
+
+        # Extract GFA from snapshot metrics
+        gfa: float | None = next(
+            (m.value for m in snapshot.metrics if m.key == MK.GROSS_FLOOR_AREA_M2 and m.value is not None),
+            None,
+        )
+
+        run_metrics: dict[str, Any] = {
+            "model_ref_id": str(run.speckle_model_ref_id) if run.speckle_model_ref_id else None,
+            "snapshot_id": str(snapshot.id),
+            "parcel_area_m2": parcel_area_m2,
+            "gfa_m2": gfa,
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if gfa is not None and parcel_area_m2 > 0:
+            far = round(gfa / parcel_area_m2, 4)
+            run_metrics["far"] = far
+            log.info(
+                "compute_run_metrics: run=%s FAR=%.4f (GFA=%.1f m² / parcel=%.1f m²)",
+                run.id, far, gfa, parcel_area_m2,
+            )
+        else:
+            run_metrics["far"] = None
+            log.warning(
+                "compute_run_metrics: run=%s FAR not computable — gfa=%s parcel=%.1f m²",
+                run.id, gfa, parcel_area_m2,
+            )
+
+        # lot_coverage_pct requires shapely + footprint polygon — not yet implemented
+        run_metrics["lot_coverage_pct"] = None
+
+        return run_metrics
 
 
 # ════════════════════════════════════════════════════════════
@@ -2810,13 +2883,19 @@ def _extract_generic_candidates(
 
 def _derive_metrics_from_candidates(
     candidates: NormalizedCandidates,
-    parcel_area_m2: float | None,
 ) -> tuple[list[GeometrySnapshotMetric], dict[str, Any]]:
     """
-    Derives V1 metrics from the normalized semantic candidates.
+    Derives V1 model-only metrics from the normalized semantic candidates.
 
     Returns (metrics, derivation_diagnostics).  The diagnostics dict is stored
     verbatim in raw_metrics["metric_derivation"] for post-hoc traceability.
+
+    Model-only metrics computed here (no site context required):
+      - gross_floor_area_m2, building_height_m, parking_spaces_provided
+
+    Run-specific metrics NOT computed here (require parcel_area_m2 from site context):
+      - far = GFA / parcel_area_m2  → use POST .../compute-run-metrics
+      - lot_coverage_pct            → pending shapely footprint polygon support
 
     GFA source-priority strategy (to prevent double-counting):
       1. Slab/floor family (IfcSlab, IfcFloor, IfcPlate) — physical floor plates
@@ -3244,22 +3323,6 @@ def _derive_metrics_from_candidates(
 
     diagnostics["height"] = height_diag
 
-    # ── FAR ────────────────────────────────────────────────────────────────────
-    if gfa is not None and parcel_area_m2 and parcel_area_m2 > 0:
-        far = gfa / parcel_area_m2
-        metrics.append(GeometrySnapshotMetric(
-            key=MetricKey.FAR,
-            value=round(far, 4),
-            units=None,
-            source_object_ids=[],
-            computation_notes=f"GFA {gfa:.1f} m² ÷ parcel {parcel_area_m2:.1f} m²",
-        ))
-        log.debug("_derive_metrics: FAR = %.4f", far)
-    elif gfa is not None and not parcel_area_m2:
-        log.debug(
-            "_derive_metrics: FAR not derived — parcel_area_m2 missing from site_context"
-        )
-
     # ── Parking spaces ─────────────────────────────────────────────────────────
     if candidates.parking_candidates:
         p_ids  = [c.source_obj_id for c in candidates.parking_candidates if c.source_obj_id]
@@ -3425,7 +3488,7 @@ def _extract_metrics_from_objects(
         len(all_elements), objects.get("__archai_objects_wrapper", False),
     )
     candidates = _normalize_elements(all_elements)
-    metrics, _ = _derive_metrics_from_candidates(candidates, parcel_area_m2)
+    metrics, _ = _derive_metrics_from_candidates(candidates)
 
     log.debug(
         "_extract_metrics_from_objects: %d elements → %d metrics (%s)",

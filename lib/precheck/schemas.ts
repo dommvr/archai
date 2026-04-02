@@ -3,8 +3,10 @@ import {
   CHECKLIST_CATEGORIES,
   CHECK_RESULT_STATUSES,
   ISSUE_SEVERITIES,
+  ISSUE_TYPES,
   METRIC_KEYS,
   PRECHECK_RUN_STATUSES,
+  READINESS_LABELS,
   RULE_SOURCE_KINDS,
   RULE_STATUSES,
 } from "./constants"
@@ -51,6 +53,9 @@ export const SiteContextSchema = z.object({
   parcelBoundary: PolygonSchema.nullable().optional(),
   sourceProvider: z.string(),
   rawSourceData: z.unknown().optional(),
+  // Added by migration 20240301000019 — Polish administrative hierarchy
+  district: z.string().nullable().optional(),   // powiat
+  province: z.string().nullable().optional(),   // województwo
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -183,11 +188,22 @@ export const ComplianceCheckSchema = z.object({
 })
 
 // rule_id and check_id use ON DELETE SET NULL so they are nullable UUIDs.
+// Phase 2 adds: projectId, issueType, recommendedAction, source traceability, updatedAt.
 // explanation, metric_key, value fields, citation, affected_geometry are
 // all nullable columns in compliance_issues.
 export const ComplianceIssueSchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
+  // Phase 2 additions
+  projectId: z.string().uuid().nullable().optional(),
+  issueType: z.enum(ISSUE_TYPES).nullable().optional(),
+  recommendedAction: z.string().nullable().optional(),
+  sourceDocumentId: z.string().uuid().nullable().optional(),
+  sourcePageStart: z.number().int().nullable().optional(),
+  sourcePageEnd: z.number().int().nullable().optional(),
+  sourceSectionNumber: z.string().nullable().optional(),
+  sourceSectionTitle: z.string().nullable().optional(),
+  // Core fields (original)
   ruleId: z.string().uuid().nullable().optional(),
   checkId: z.string().uuid().nullable().optional(),
   severity: z.enum(ISSUE_SEVERITIES),
@@ -205,6 +221,7 @@ export const ComplianceIssueSchema = z.object({
   affectedObjectIds: z.array(z.string()).default([]),
   affectedGeometry: PolygonSchema.nullable().optional(),
   createdAt: z.string(),
+  updatedAt: z.string().nullable().optional(),
 })
 
 // description is nullable in permit_checklist_items.
@@ -222,6 +239,7 @@ export const PermitChecklistItemSchema = z.object({
 // site_context_id and speckle_model_ref_id are FK UUIDs with ON DELETE SET NULL.
 // readiness_score and error_message are nullable by design (unset until evaluated).
 // current_step is nullable text — null on a freshly created run.
+// is_stale and rules_changed_at added by migration 20240301000021_precheck_runs_stale.sql.
 export const PrecheckRunSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
@@ -232,6 +250,10 @@ export const PrecheckRunSchema = z.object({
   readinessScore: z.number().min(0).max(100).nullable().optional(),
   currentStep: z.string().nullable().optional(),
   errorMessage: z.string().nullable().optional(),
+  isStale: z.boolean().default(false),
+  rulesChangedAt: z.string().nullable().optional(),
+  // Run-specific metrics (FAR, lot_coverage_pct) populated via compute-run-metrics.
+  runMetrics: z.record(z.string(), z.unknown()).nullable().optional(),
   createdBy: z.string().uuid(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -253,6 +275,10 @@ export const IngestSiteInputSchema = z.object({
     jurisdictionCode: z.string().optional(),
     zoningDistrict: z.string().optional(),
     parcelAreaM2: z.number().optional(),
+    // Added by migration 20240301000019
+    district: z.string().optional(),   // powiat
+    province: z.string().optional(),   // województwo
+    parcelId: z.string().optional(),
   }).optional(),
 })
 
@@ -277,12 +303,71 @@ export const EvaluateComplianceInputSchema = z.object({
   runId: z.string().uuid(),
 })
 
+export const ComputeRunMetricsInputSchema = z.object({
+  runId: z.string().uuid(),
+})
+
 export const RegisterDocumentInputSchema = z.object({
   runId: z.string().uuid(),
   storagePath: z.string().min(1),
   fileName: z.string().min(1),
   mimeType: z.string().min(1),
   documentType: z.enum(["zoning_code", "building_code", "project_doc", "other"]),
+})
+
+// ── Phase 3: Readiness breakdown ─────────────────────────────────────────────
+
+/**
+ * One line-item explaining a score delta or a hard block.
+ * Mirrors ReadinessReason in backend/app/core/schemas.py.
+ */
+export const ReadinessReasonSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  delta: z.number().int(),
+  isBlocking: z.boolean().default(false),
+})
+
+/**
+ * Controlled vocabulary for the readiness label.
+ * Mirrors ReadinessLabel in backend/app/core/schemas.py.
+ */
+export const ReadinessLabelSchema = z.enum(READINESS_LABELS)
+
+/**
+ * Rich readiness breakdown — score + label + ordered reasons + convenience counts.
+ * Mirrors ReadinessBreakdown in backend/app/core/schemas.py.
+ * Computed fresh by compute_readiness_breakdown() on every GET /runs/{id}
+ * and GET /runs/{id}/summary — never stale.
+ */
+export const ReadinessBreakdownSchema = z.object({
+  score: z.number().int().min(0).max(100),
+  label: ReadinessLabelSchema,
+  reasons: z.array(ReadinessReasonSchema).default([]),
+  failCount: z.number().int().nonnegative().default(0),
+  warningCount: z.number().int().nonnegative().default(0),
+  notEvaluableCount: z.number().int().nonnegative().default(0),
+  blockingIssueCount: z.number().int().nonnegative().default(0),
+})
+
+/**
+ * Compact run summary — used by the metrics panel and Copilot tools.
+ * Maps to GET /precheck/runs/{id}/summary.
+ * Mirrors PrecheckRunSummaryResponse in backend/app/core/schemas.py.
+ */
+export const PrecheckRunSummaryResponseSchema = z.object({
+  runId: z.string().uuid(),
+  runStatus: z.enum(PRECHECK_RUN_STATUSES),
+  readiness: ReadinessBreakdownSchema,
+  authoritativeRuleCount: z.number().int().nonnegative(),
+  checklistTotal: z.number().int().nonnegative(),
+  checklistResolved: z.number().int().nonnegative(),
+  issueTotal: z.number().int().nonnegative(),
+  issueFailCount: z.number().int().nonnegative(),
+  issueWarningCount: z.number().int().nonnegative(),
+  issueMissingDataCount: z.number().int().nonnegative(),
+  isStale: z.boolean().default(false),
+  rulesChangedAt: z.string().nullable().optional(),
 })
 
 export const GetRunDetailsResponseSchema = z.object({
@@ -294,6 +379,8 @@ export const GetRunDetailsResponseSchema = z.object({
   rules: z.array(ExtractedRuleSchema),
   issues: z.array(ComplianceIssueSchema),
   checklist: z.array(PermitChecklistItemSchema),
+  // Phase 3: readiness breakdown (null if run has never been evaluated)
+  readinessBreakdown: ReadinessBreakdownSchema.nullable().optional(),
 })
 
 export const ProjectRunsResponseSchema = z.object({
@@ -390,11 +477,17 @@ export const AssignSiteContextInputSchema = z.object({
 export const CreateProjectSiteContextInputSchema = z.object({
   projectId: z.string().uuid(),
   address: z.string().optional(),
+  centroid: LatLngSchema.optional(),
+  parcelBoundary: PolygonSchema.optional(),
   manualOverrides: z.object({
     municipality: z.string().optional(),
     jurisdictionCode: z.string().optional(),
     zoningDistrict: z.string().optional(),
     parcelAreaM2: z.number().optional(),
+    // Added by migration 20240301000019
+    district: z.string().optional(),   // powiat
+    province: z.string().optional(),   // województwo
+    parcelId: z.string().optional(),
   }).optional(),
   setAsDefault: z.boolean().optional(),
 })

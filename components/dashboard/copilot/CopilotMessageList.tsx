@@ -1,10 +1,10 @@
 'use client'
 
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { Bot, User, Loader2, Wrench, BookmarkPlus, Check } from 'lucide-react'
+import { Bot, User, Loader2, Wrench, BookmarkPlus, Check, Paperclip, X, Image as ImageIcon } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
-import type { CopilotMessage } from '@/types'
+import type { CopilotAttachment, CopilotMessage } from '@/types'
 
 interface CopilotMessageListProps {
   messages: CopilotMessage[]
@@ -61,6 +61,7 @@ function MessageBubble({
   const isTool      = message.role === 'tool'
   const isAssistant = message.role === 'assistant'
   const [pinned, setPinned] = useState(false)
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
 
   if (isTool) {
     return <ToolResultStrip message={message} />
@@ -70,64 +71,206 @@ function MessageBubble({
     if (!onPinToNotes || pinned) return
     await onPinToNotes(message)
     setPinned(true)
-    // Reset after 3s to allow re-pinning (e.g. different title)
     setTimeout(() => setPinned(false), 3000)
   }
 
-  return (
-    <div className={cn('flex gap-2.5 group', isUser && 'flex-row-reverse')}>
-      {/* Avatar */}
-      <div
-        className={cn(
-          'w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5',
-          isAssistant
-            ? 'bg-archai-orange/10 border border-archai-orange/20'
-            : 'bg-archai-graphite'
-        )}
-      >
-        {isAssistant ? (
-          <Bot className="h-3.5 w-3.5 text-archai-orange" />
-        ) : (
-          <User className="h-3.5 w-3.5 text-muted-foreground" />
-        )}
-      </div>
+  const attachments = message.attachments ?? []
 
-      {/* Bubble + pin action */}
-      <div className="flex flex-col gap-1 max-w-[85%]">
+  return (
+    <>
+      <div className={cn('flex gap-2.5 group', isUser && 'flex-row-reverse')}>
+        {/* Avatar */}
         <div
           className={cn(
-            'rounded-lg px-3 py-2 text-xs leading-relaxed',
+            'w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5',
             isAssistant
-              ? 'bg-archai-black/50 border border-archai-graphite text-muted-foreground'
-              : 'bg-archai-orange/10 border border-archai-orange/20 text-white'
+              ? 'bg-archai-orange/10 border border-archai-orange/20'
+              : 'bg-archai-graphite'
           )}
         >
-          <MessageContent content={message.content} />
+          {isAssistant ? (
+            <Bot className="h-3.5 w-3.5 text-archai-orange" />
+          ) : (
+            <User className="h-3.5 w-3.5 text-muted-foreground" />
+          )}
         </div>
 
-        {/* "Pin to notes" — only on assistant messages, visible on hover */}
-        {isAssistant && onPinToNotes && (
-          <button
-            type="button"
-            onClick={handlePin}
+        {/* Bubble + attachments + pin action */}
+        <div className={cn('flex flex-col gap-1 max-w-[85%]', isUser && 'items-end')}>
+          {/* Attachment thumbnails — shown above the text bubble for user messages */}
+          {isUser && attachments.length > 0 && (
+            <AttachmentList
+              attachments={attachments}
+              onImageClick={(src) => setLightboxSrc(src)}
+            />
+          )}
+
+          <div
             className={cn(
-              'self-start flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded',
-              'opacity-0 group-hover:opacity-100 transition-opacity',
-              pinned
-                ? 'text-emerald-400 cursor-default'
-                : 'text-muted-foreground/50 hover:text-archai-orange transition-colors',
+              'rounded-lg px-3 py-2 text-xs leading-relaxed',
+              isAssistant
+                ? 'bg-archai-black/50 border border-archai-graphite text-muted-foreground'
+                : 'bg-archai-orange/10 border border-archai-orange/20 text-white'
             )}
-            aria-label="Save this answer as a project note"
-            disabled={pinned}
           >
-            {pinned ? (
-              <><Check className="h-2.5 w-2.5" />Saved to notes</>
-            ) : (
-              <><BookmarkPlus className="h-2.5 w-2.5" />Pin to notes</>
-            )}
-          </button>
-        )}
+            <MessageContent content={message.content} />
+          </div>
+
+          {/* Attachment thumbnails — shown below the text bubble for assistant messages */}
+          {isAssistant && attachments.length > 0 && (
+            <AttachmentList
+              attachments={attachments}
+              onImageClick={(src) => setLightboxSrc(src)}
+            />
+          )}
+
+          {/* "Pin to notes" — only on assistant messages, visible on hover */}
+          {isAssistant && onPinToNotes && (
+            <button
+              type="button"
+              onClick={handlePin}
+              className={cn(
+                'self-start flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded',
+                'opacity-0 group-hover:opacity-100 transition-opacity',
+                pinned
+                  ? 'text-emerald-400 cursor-default'
+                  : 'text-muted-foreground/50 hover:text-archai-orange transition-colors',
+              )}
+              aria-label="Save this answer as a project note"
+              disabled={pinned}
+            >
+              {pinned ? (
+                <><Check className="h-2.5 w-2.5" />Saved to notes</>
+              ) : (
+                <><BookmarkPlus className="h-2.5 w-2.5" />Pin to notes</>
+              )}
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Image lightbox — rendered at the bubble level so it doesn't break flex layout */}
+      {lightboxSrc && (
+        <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      )}
+    </>
+  )
+}
+
+// ── Attachment rendering ──────────────────────────────────────
+
+/**
+ * Renders attachment list for a message.
+ * Images: small clickable thumbnails that open the lightbox.
+ * Files: filename chips with a paperclip icon.
+ */
+function AttachmentList({
+  attachments,
+  onImageClick,
+}: {
+  attachments: CopilotAttachment[]
+  onImageClick: (src: string) => void
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5 max-w-full">
+      {attachments.map((att) => {
+        const isImage =
+          att.attachmentType === 'image' ||
+          att.attachmentType === 'screenshot' ||
+          (att.mimeType?.startsWith('image/') ?? false)
+
+        // Prefer server-issued signed URL (persisted messages) over local blob URL
+        // (optimistic messages). storagePath is not a public URL — never use it directly.
+        const previewSrc = att.signedUrl ?? att._previewUrl ?? null
+
+        if (isImage) {
+          return (
+            <button
+              key={att.id}
+              type="button"
+              onClick={() => previewSrc && onImageClick(previewSrc)}
+              title={att.filename}
+              aria-label={`View image: ${att.filename}`}
+              className={cn(
+                'relative w-16 h-16 rounded border overflow-hidden shrink-0',
+                'border-archai-graphite hover:border-archai-orange/40',
+                'transition-colors',
+                !previewSrc && 'cursor-default',
+              )}
+            >
+              {previewSrc ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={previewSrc}
+                  alt={att.filename}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="w-full h-full bg-archai-graphite/40 flex flex-col items-center justify-center gap-0.5">
+                  <ImageIcon className="h-4 w-4 text-muted-foreground/50" />
+                  <span className="text-[8px] text-muted-foreground/40 px-1 truncate max-w-full">
+                    {att.filename}
+                  </span>
+                </div>
+              )}
+            </button>
+          )
+        }
+
+        // Non-image file chip
+        return (
+          <div
+            key={att.id}
+            title={att.filename}
+            className={cn(
+              'flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] border',
+              'border-archai-graphite text-muted-foreground/70 bg-archai-black/30',
+            )}
+          >
+            <Paperclip className="h-2.5 w-2.5 shrink-0" />
+            <span className="max-w-[120px] truncate">{att.filename}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Full-screen image lightbox.
+ * Click backdrop or X button to close.
+ */
+function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image preview"
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute top-4 right-4 p-1.5 rounded bg-archai-charcoal/80 text-white hover:text-archai-orange transition-colors"
+        aria-label="Close image preview"
+      >
+        <X className="h-4 w-4" />
+      </button>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt="Attachment preview"
+        className="max-w-full max-h-full rounded shadow-2xl object-contain"
+        onClick={(e) => e.stopPropagation()}
+      />
     </div>
   )
 }

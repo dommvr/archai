@@ -21,6 +21,7 @@ import type {
   CopilotMessage,
   CopilotUiContext,
   CreateNotePayload,
+  PendingAttachmentMeta,
 } from '@/types'
 
 // ── Last-active-thread persistence ─────────────────────────
@@ -75,7 +76,7 @@ export interface UseCopilotReturn {
   createThread: () => Promise<CopilotThread | null>
   archiveThread: (threadId: string) => Promise<void>
   renameThread: (threadId: string, title: string) => Promise<void>
-  sendMessage: (content: string, attachmentIds?: string[]) => Promise<void>
+  sendMessage: (content: string, attachmentIds?: string[], pendingAttachments?: PendingAttachmentMeta[]) => Promise<void>
   sending: boolean
   sendError: string | null
   createError: string | null
@@ -141,12 +142,25 @@ export function useCopilot({ projectId, uiContext }: UseCopilotOptions): UseCopi
     setMessages([])
     setMessagesLoading(true)
     try {
+      // limit=100 matches the backend hard cap (min(limit, 100) in the router).
+      // We fetch the oldest 100 messages (offset=0, asc order). Threads with
+      // >100 messages would need pagination — for now 100 covers all testing threads.
       const res = await fetch(
-        `/api/copilot/threads/${thread.id}/messages?limit=50`,
+        `/api/copilot/threads/${thread.id}/messages?limit=100`,
         { cache: 'no-store' }
       )
       if (!res.ok) throw new Error(`Failed to load messages (${res.status})`)
       const data = (await res.json()) as CopilotMessage[]
+      if (process.env.NODE_ENV === 'development') {
+        console.debug(
+          `[Copilot] Loaded thread ${thread.id}: ${data.length} message(s)`,
+          data.map((m) => ({
+            id: m.id.slice(0, 8),
+            role: m.role,
+            attachments: m.attachments?.length ?? 0,
+          }))
+        )
+      }
       setMessages(data)
     } catch {
       // Non-fatal: show empty state rather than blocking the UI
@@ -254,7 +268,7 @@ export function useCopilot({ projectId, uiContext }: UseCopilotOptions): UseCopi
   // ── Send a message (auto-creates thread if none active) ──
 
   const sendMessage = useCallback(
-    async (content: string, attachmentIds: string[] = []) => {
+    async (content: string, attachmentIds: string[] = [], pendingAttachments: PendingAttachmentMeta[] = []) => {
       if (sendingRef.current) return
       if (!content.trim()) return
 
@@ -303,7 +317,7 @@ export function useCopilot({ projectId, uiContext }: UseCopilotOptions): UseCopi
         }
       }
 
-      // Optimistic: append user message immediately
+      // Optimistic: append user message immediately (with pending attachment previews)
       const optimisticUserMsg: CopilotMessage = {
         id: `optimistic-${Date.now()}`,
         threadId: thread.id,
@@ -312,6 +326,24 @@ export function useCopilot({ projectId, uiContext }: UseCopilotOptions): UseCopi
         content: content.trim(),
         createdAt: new Date().toISOString(),
         uiContext: uiContext ?? null,
+        // Build minimal CopilotAttachment-compatible objects for preview.
+        // These will be replaced by the real persisted rows from the server response.
+        attachments: pendingAttachments.map((pa) => ({
+          id: pa.attachmentId,
+          threadId: thread.id,
+          messageId: null,
+          projectId,
+          userId: '',
+          attachmentType: (pa.isImage ? 'image' : 'document') as 'image' | 'document' | 'screenshot',
+          filename: pa.filename,
+          mimeType: pa.mimeType,
+          storagePath: '',
+          fileSizeBytes: null,
+          contextMetadata: null,
+          createdAt: new Date().toISOString(),
+          // Non-standard: local previewUrl for immediate rendering before signed URL is available
+          _previewUrl: pa.previewUrl,
+        })),
       }
       setMessages((prev) => [...prev, optimisticUserMsg])
 

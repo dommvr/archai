@@ -83,6 +83,27 @@ class UpdateThreadRequest(BaseSchema):
     archived: bool | None = None
 
 
+# ── Attachment ────────────────────────────────────────────────
+# Defined before CopilotMessage so it can be referenced without a forward ref.
+
+class CopilotAttachment(BaseSchema):
+    id: UUID
+    thread_id: UUID
+    message_id: UUID | None = None
+    project_id: UUID
+    user_id: UUID
+    attachment_type: CopilotAttachmentType
+    filename: str
+    mime_type: str | None = None
+    storage_path: str
+    file_size_bytes: int | None = None
+    context_metadata: dict[str, Any] | None = None
+    created_at: datetime
+    # Transient field — never stored in DB; populated server-side when serving
+    # message history so the frontend can render image thumbnails directly.
+    signed_url: str | None = None
+
+
 # ── Message ───────────────────────────────────────────────────
 
 class CopilotMessage(BaseSchema):
@@ -96,6 +117,9 @@ class CopilotMessage(BaseSchema):
     tool_payload: dict[str, Any] | None = None
     ui_context: CopilotUiContext | None = None
     created_at: datetime
+    # Attachment rows linked to this message (populated by list_messages, empty
+    # for messages returned directly from append_message to avoid N+1 on send).
+    attachments: list[CopilotAttachment] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseSchema):
@@ -111,23 +135,6 @@ class SendMessageResponse(BaseSchema):
     # Tool messages produced during this turn, in execution order.
     # Included so the frontend can display them live without a round-trip reload.
     tool_messages: list[CopilotMessage] = []
-
-
-# ── Attachment ────────────────────────────────────────────────
-
-class CopilotAttachment(BaseSchema):
-    id: UUID
-    thread_id: UUID
-    message_id: UUID | None = None
-    project_id: UUID
-    user_id: UUID
-    attachment_type: CopilotAttachmentType
-    filename: str
-    mime_type: str | None = None
-    storage_path: str
-    file_size_bytes: int | None = None
-    context_metadata: dict[str, Any] | None = None
-    created_at: datetime
 
 
 class CreateAttachmentRequest(BaseSchema):

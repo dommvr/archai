@@ -78,3 +78,22 @@ export const CHECKLIST_CATEGORIES = [
 ] as const
 
 export type ChecklistCategory = (typeof CHECKLIST_CATEGORIES)[number]
+
+export const ISSUE_TYPES = [
+  "violation",
+  "warning",
+  "missing_data",
+  "ambiguous_rule",
+  "unsupported_basis",
+] as const
+
+export type IssueType = (typeof ISSUE_TYPES)[number]
+
+export const READINESS_LABELS = [
+  "permit_ready",
+  "issues_to_resolve",
+  "incomplete_input",
+  "not_yet_evaluated",
+] as const
+
+export type ReadinessLabel = (typeof READINESS_LABELS)[number]

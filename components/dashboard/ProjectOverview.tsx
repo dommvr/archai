@@ -10,7 +10,8 @@
  * without duplicating any data-fetching logic.
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import dynamic from 'next/dynamic'
 import { useRouter } from 'next/navigation'
 import {
   Eye,
@@ -34,6 +35,13 @@ import { RightPanel } from './RightPanel'
 import { ProjectDefaultSiteContextPanel } from './precheck/SiteContextPicker'
 import { ProjectNotesPanel } from './ProjectNotesPanel'
 import { ResizableHorizontalSplit } from '@/components/ui/resizable-horizontal-split'
+import type { ParcelSelection } from './precheck/SiteContextMapModal'
+
+// Dynamically import the map modal — heavy Mapbox bundle, never SSR'd
+const SiteContextMapModal = dynamic(
+  () => import('./precheck/SiteContextMapModal').then((m) => m.SiteContextMapModal),
+  { ssr: false }
+)
 
 interface ProjectOverviewProps {
   projectId: string
@@ -69,6 +77,9 @@ export function ProjectOverview({ projectId, projectName }: ProjectOverviewProps
   const [runs, setRuns] = useState<PrecheckRun[]>([])
   const [loadingRuns, setLoadingRuns] = useState(true)
   const [activeModelRef, setActiveModelRef] = useState<SpeckleModelRef | null>(null)
+  const [mapOpen, setMapOpen] = useState(false)
+  // Ref to the fill function registered by ProjectDefaultSiteContextPanel
+  const fillSiteContextRef = useRef<((parcel: ParcelSelection) => void) | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -118,6 +129,7 @@ export function ProjectOverview({ projectId, projectName }: ProjectOverviewProps
   ]
 
   return (
+    <>
     <ResizableHorizontalSplit
       storageKey="project-overview-right-panel"
       defaultLeftPercent={72}
@@ -211,7 +223,11 @@ export function ProjectOverview({ projectId, projectName }: ProjectOverviewProps
               <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
                 Default Site Context
               </p>
-              <ProjectDefaultSiteContextPanel projectId={projectId} />
+              <ProjectDefaultSiteContextPanel
+                projectId={projectId}
+                onMapOpen={() => setMapOpen(true)}
+                onFillRef={(fn) => { fillSiteContextRef.current = fn }}
+              />
             </section>
 
             {/* Latest runs */}
@@ -321,5 +337,16 @@ export function ProjectOverview({ projectId, projectName }: ProjectOverviewProps
         </aside>
       }
     />
+
+    {/* Site context map modal — dynamically imported, never SSR'd */}
+    <SiteContextMapModal
+      open={mapOpen}
+      onClose={() => setMapOpen(false)}
+      projectId={projectId}
+      onConfirm={(parcel) => {
+        fillSiteContextRef.current?.(parcel)
+      }}
+    />
+    </>
   )
 }

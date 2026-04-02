@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, RefreshCw } from 'lucide-react'
+import dynamic from 'next/dynamic'
+import { AlertTriangle, Plus, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -27,6 +28,7 @@ import { RuleExtractionStatusCard } from './RuleExtractionStatusCard'
 import { ManualRuleDialog } from './ManualRuleDialog'
 import { SpeckleModelPicker } from './SpeckleModelPicker'
 import { PrecheckProgressCard } from './PrecheckProgressCard'
+import { RunMetricsStatusCard } from './RunMetricsStatusCard'
 import { ReadinessScoreCard } from './ReadinessScoreCard'
 import { ComplianceIssuesTable } from './ComplianceIssuesTable'
 import { ComplianceIssueDrawer } from './ComplianceIssueDrawer'
@@ -35,6 +37,13 @@ import { PrecheckViewerPanel } from './PrecheckViewerPanel'
 import { ResizableVerticalSplit } from '@/components/ui/resizable-vertical-split'
 import { ResizableHorizontalSplit } from '@/components/ui/resizable-horizontal-split'
 import type { CreateManualRuleInput } from '@/lib/precheck/types'
+import type { ParcelSelection } from './SiteContextMapModal'
+
+// Dynamically import the map modal — heavy Mapbox bundle, never SSR'd
+const SiteContextMapModal = dynamic(
+  () => import('./SiteContextMapModal').then((m) => m.SiteContextMapModal),
+  { ssr: false }
+)
 
 type Tab = 'setup' | 'issues' | 'checklist'
 
@@ -66,10 +75,14 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
   const [loadingDetails, setLoadingDetails] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [syncingModel, setSyncingModel] = useState(false)
+  const [computingRunMetrics, setComputingRunMetrics] = useState(false)
   const [manualRuleOpen, setManualRuleOpen] = useState(false)
   // Tracks docs selected in the project library but not yet ingested.
   // Used so hasDocuments is true as soon as the user picks docs, not only after ingestion.
   const [selectedDocCount, setSelectedDocCount] = useState(0)
+  const [siteContextMapOpen, setSiteContextMapOpen] = useState(false)
+  // Ref to the fill function registered by SiteContextPicker
+  const fillSiteContextRef = useRef<((parcel: ParcelSelection) => void) | null>(null)
 
   // Ref that always reflects the current selectedRunId without closure staleness.
   // handleSelectRun and fetchProjectRuns read this instead of the closed-over
@@ -229,6 +242,8 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
             errorMessage:       raw['error_message']        as string | null | undefined,
             siteContextId:      raw['site_context_id']      as string | null | undefined,
             speckleModelRefId:  raw['speckle_model_ref_id'] as string | null | undefined,
+            isStale:            raw['is_stale']             as boolean | undefined,
+            rulesChangedAt:     raw['rules_changed_at']     as string | null | undefined,
             updatedAt:          raw['updated_at']           as string,
           }
           setRuns((prev) =>
@@ -374,6 +389,39 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
   }
 
   /**
+   * Called by SpeckleModelPicker (and the main-page RunMetricsStatusCard) after
+   * compute-run-metrics succeeds. Patches runMetrics into both the runs list and
+   * the current runDetails so the FAR/status display updates immediately.
+   */
+  function handleRunMetricsComputed(updatedRun: PrecheckRun) {
+    setRuns((prev) =>
+      prev.map((r) => (r.id === updatedRun.id ? { ...r, runMetrics: updatedRun.runMetrics } : r))
+    )
+    setRunDetails((prev) =>
+      prev && prev.run.id === updatedRun.id
+        ? { ...prev, run: { ...prev.run, runMetrics: updatedRun.runMetrics } }
+        : prev
+    )
+  }
+
+  /**
+   * Main-page "Compute run metrics" handler used by RunMetricsStatusCard.
+   * Mirrors the logic inside SpeckleModelPicker but lives at the workspace
+   * level so it can drive the computingRunMetrics state used by both the
+   * status card and the PrecheckProgressCard.
+   */
+  async function handleComputeRunMetrics() {
+    if (!selectedRunId) return
+    setComputingRunMetrics(true)
+    try {
+      const updatedRun = await precheckApi.computeRunMetrics({ runId: selectedRunId })
+      handleRunMetricsComputed(updatedRun)
+    } finally {
+      setComputingRunMetrics(false)
+    }
+  }
+
+  /**
    * Assign an existing project SiteContext to the current run without creating
    * a new site_contexts row. Called by SiteContextPicker when the user picks
    * from the project library (not when they submit new site data via the form).
@@ -421,6 +469,13 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
 
   async function handleApproveRule(ruleId: string) {
     await precheckApi.approveRule({ ruleId })
+    if (selectedRunId) {
+      await fetchRunDetails(selectedRunId)
+    }
+  }
+
+  async function handleUnapproveRule(ruleId: string) {
+    await precheckApi.unapproveRule({ ruleId })
     if (selectedRunId) {
       await fetchRunDetails(selectedRunId)
     }
@@ -538,7 +593,11 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
             maxTopPercent={80}
             topPanel={
               <div className="h-full overflow-y-auto space-y-3 px-4 py-3">
-                <ReadinessScoreCard score={run?.readinessScore} isLoading={loadingDetails} />
+                <ReadinessScoreCard
+                  score={run?.readinessScore}
+                  readinessBreakdown={currentRunDetails?.readinessBreakdown}
+                  isLoading={loadingDetails}
+                />
                 <PrecheckProgressCard
                   run={run ?? selectedRun}
                   hasSiteContext={
@@ -550,6 +609,8 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
                   hasRules={(currentRunDetails?.rules?.length ?? 0) > 0}
                   hasModelRef={currentRunDetails?.modelRef != null}
                   hasGeometrySnapshot={currentRunDetails?.geometrySnapshot != null}
+                  hasRunMetrics={run?.runMetrics != null}
+                  isComputingRunMetrics={computingRunMetrics}
                   isLoading={loadingDetails}
                 />
               </div>
@@ -624,6 +685,8 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
                               onPickExisting={handleAssignExistingSiteContext}
                               onSubmit={handleIngestSite}
                               isLoading={false}
+                              onMapOpen={() => setSiteContextMapOpen(true)}
+                              onFillRef={(fn) => { fillSiteContextRef.current = fn }}
                             />
                             <DocumentUploadPanel
                               key={selectedRunId}
@@ -640,6 +703,7 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
                               canExtract
                               onExtract={handleExtractRules}
                               onApprove={handleApproveRule}
+                              onUnapprove={handleUnapproveRule}
                               onReject={handleRejectRule}
                               onAddManual={() => setManualRuleOpen(true)}
                               isExtracting={extracting}
@@ -664,18 +728,51 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
                                 run?.status === 'syncing_model' ||
                                 run?.status === 'computing_metrics'
                               }
+                              onRunMetricsComputed={handleRunMetricsComputed}
                             />
 
+                            {/* Main-page run-metrics status + CTA */}
+                            {currentRunDetails?.geometrySnapshot != null && (
+                              <RunMetricsStatusCard
+                                hasModelMetrics={
+                                  (currentRunDetails.geometrySnapshot.metrics?.length ?? 0) > 0
+                                }
+                                hasRunMetrics={run?.runMetrics != null}
+                                hasSiteContextParcel={
+                                  currentRunDetails.siteContext?.parcelAreaM2 != null
+                                }
+                                isSyncing={
+                                  syncingModel ||
+                                  run?.status === 'syncing_model' ||
+                                  run?.status === 'computing_metrics'
+                                }
+                                isComputing={computingRunMetrics}
+                                onCompute={() => void handleComputeRunMetrics()}
+                              />
+                            )}
+
                             <Separator />
+
+                            {run?.isStale && (
+                              <div className="flex items-start gap-2 rounded-lg border border-archai-amber/40 bg-archai-amber/5 px-3 py-2">
+                                <AlertTriangle className="h-3.5 w-3.5 text-archai-amber mt-0.5 shrink-0" />
+                                <p className="text-[11px] text-archai-amber leading-snug">
+                                  Rules have changed since the last run — results may be outdated. Rerun to update.
+                                </p>
+                              </div>
+                            )}
 
                             <Button
                               variant="archai"
                               size="sm"
                               className="w-full"
                               onClick={() => void handleEvaluate()}
-                              disabled={run?.status === 'completed'}
+                              disabled={
+                                run?.status === 'evaluating' ||
+                                run?.status === 'generating_report'
+                              }
                             >
-                              Run Compliance Check
+                              {run?.isStale ? 'Rerun Compliance Check' : 'Run Compliance Check'}
                             </Button>
                           </>
                         )}
@@ -748,6 +845,18 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
           projectId={projectId}
           runId={selectedRunId ?? undefined}
           onCreate={handleCreateManualRule}
+        />
+      )}
+
+      {/* Site context map modal — dynamically imported, never SSR'd */}
+      {projectId && (
+        <SiteContextMapModal
+          open={siteContextMapOpen}
+          onClose={() => setSiteContextMapOpen(false)}
+          projectId={projectId}
+          onConfirm={(parcel) => {
+            fillSiteContextRef.current?.(parcel)
+          }}
         />
       )}
     </>

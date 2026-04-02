@@ -155,6 +155,45 @@ class PrecheckRepository:
         )
         return PrecheckRun.model_validate(result.data[0])
 
+    async def update_run_run_metrics(
+        self, run_id: UUID, run_metrics: dict[str, Any]
+    ) -> PrecheckRun:
+        """Persists run-specific computed metrics (FAR, lot_coverage_pct) to the run row."""
+        result = (
+            await self._db.table("precheck_runs")
+            .update({"run_metrics": run_metrics})
+            .eq("id", str(run_id))
+            .execute()
+        )
+        return PrecheckRun.model_validate(result.data[0])
+
+    async def mark_run_stale(self, project_id: UUID, changed_at: str) -> None:
+        """
+        Sets is_stale=True and rules_changed_at=changed_at on all non-failed,
+        non-evaluating runs for the project that have been evaluated at least once
+        (readiness_score IS NOT NULL).  Draft runs that were never evaluated are
+        left untouched — they are not "stale", they are simply not yet run.
+        """
+        await (
+            self._db.table("precheck_runs")
+            .update({"is_stale": True, "rules_changed_at": changed_at})
+            .eq("project_id", str(project_id))
+            .not_.is_("readiness_score", "null")
+            .neq("status", "failed")
+            .neq("status", "evaluating")
+            .neq("status", "generating_report")
+            .execute()
+        )
+
+    async def clear_run_stale(self, run_id: UUID) -> None:
+        """Resets is_stale to False at the start of a new evaluation."""
+        await (
+            self._db.table("precheck_runs")
+            .update({"is_stale": False})
+            .eq("id", str(run_id))
+            .execute()
+        )
+
     # ── site_contexts ─────────────────────────────────────────
 
     async def upsert_site_context(self, row: dict[str, Any]) -> SiteContext:

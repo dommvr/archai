@@ -6,6 +6,7 @@ import {
   ApproveRuleInputSchema,
   AssignModelRefInputSchema,
   AssignSiteContextInputSchema,
+  ComputeRunMetricsInputSchema,
   CreateManualRuleInputSchema,
   CreatePrecheckRunInputSchema,
   CreateProjectSiteContextInputSchema,
@@ -48,8 +49,10 @@ type PrecheckAction =
   | 'set_default_site_context'
   | 'create_project_site_context'
   | 'delete_project_site_context'
+  | 'compute_run_metrics'
   // Rule management (V2)
   | 'approve_rule'
+  | 'unapprove_rule'
   | 'reject_rule'
   | 'create_manual_rule'
   | 'update_manual_rule'
@@ -315,6 +318,19 @@ async function handlePrecheckPost(
       })
     }
 
+    case 'compute_run_metrics': {
+      const parsed = validatePayload(ComputeRunMetricsInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${parsed.runId}/compute-run-metrics`,
+        method: 'POST',
+      })
+    }
+
     case 'register_document': {
       const parsed = validatePayload(RegisterDocumentInputSchema, payload)
       if (parsed instanceof NextResponse) {
@@ -487,6 +503,19 @@ async function handlePrecheckPost(
       })
     }
 
+    case 'unapprove_rule': {
+      const parsed = validatePayload(ApproveRuleInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/rules/${parsed.ruleId}/unapprove`,
+        method: 'POST',
+      })
+    }
+
     case 'reject_rule': {
       const parsed = validatePayload(RejectRuleInputSchema, payload)
       if (parsed instanceof NextResponse) {
@@ -556,6 +585,13 @@ async function handlePrecheckGet(request: NextRequest, accessToken: string) {
   const scope = searchParams.get('scope')
 
   if (runId) {
+    if (scope === 'summary') {
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${runId}/summary`,
+        method: 'GET',
+      })
+    }
     return proxyFastApi({
       accessToken,
       path: `/precheck/runs/${runId}`,

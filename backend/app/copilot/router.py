@@ -193,9 +193,14 @@ async def list_messages(
     if thread is None:
         raise HTTPException(status_code=404, detail="Thread not found")
 
+    capped = min(limit, 200)
+    log.debug(
+        "list_messages: thread=%s limit=%d offset=%d",
+        thread_id, capped, offset,
+    )
     return await repo.list_messages(
         thread_id=thread_id,
-        limit=min(limit, 100),
+        limit=capped,
         offset=offset,
     )
 
@@ -302,8 +307,12 @@ async def get_attachment_upload_url(
         signed = await request.app.state.supabase.storage.from_(
             "copilot-attachments"
         ).create_signed_upload_url(storage_path)
-        # supabase-py returns {"signedURL": "...", "path": "...", "token": "..."}
-        upload_url: str = signed["signedURL"]
+        # storage3 returns {"signed_url": "...", "signedUrl": "...", "token": "...", "path": "..."}
+        # Use .get() with both key variants so we are robust against any
+        # future storage3 rename; signed_url (snake_case) is the canonical key.
+        upload_url: str = signed.get("signed_url") or signed.get("signedUrl") or ""
+        if not upload_url:
+            raise KeyError(f"No upload URL in storage response: {list(signed.keys())}")
     except Exception as exc:
         log.error(
             "get_attachment_upload_url: Storage signed URL generation failed "

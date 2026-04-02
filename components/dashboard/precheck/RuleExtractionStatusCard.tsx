@@ -132,6 +132,7 @@ interface RuleExtractionStatusCardProps {
   canExtract:      boolean
   onExtract:       () => Promise<void>
   onApprove?:      (ruleId: string) => Promise<void>
+  onUnapprove?:    (ruleId: string) => Promise<void>
   onReject?:       (ruleId: string) => Promise<void>
   onAddManual?:    () => void
   isLoading?:      boolean
@@ -222,6 +223,7 @@ export function RuleExtractionStatusCard({
   canExtract,
   onExtract,
   onApprove,
+  onUnapprove,
   onReject,
   onAddManual,
   isLoading,
@@ -305,6 +307,12 @@ export function RuleExtractionStatusCard({
     if (!onApprove || pendingId) return
     setPendingId(ruleId)
     try { await onApprove(ruleId) } finally { setPendingId(null) }
+  }
+
+  async function handleUnapprove(ruleId: string) {
+    if (!onUnapprove || pendingId) return
+    setPendingId(ruleId)
+    try { await onUnapprove(ruleId) } finally { setPendingId(null) }
   }
 
   async function handleReject(ruleId: string) {
@@ -467,8 +475,9 @@ export function RuleExtractionStatusCard({
                       key={rule.id}
                       rule={rule}
                       isPending={pendingId === rule.id}
-                      // No approve/reject in the active section — these rules are
-                      // already authoritative. Read-only display only.
+                      // Unapprove available for approved extracted rules (not manual).
+                      // Manual rules are always authoritative and cannot be unapproved.
+                      onUnapprove={onUnapprove && rule.sourceKind !== 'manual' ? handleUnapprove : undefined}
                     />
                   ))}
                 </div>
@@ -707,6 +716,7 @@ interface RuleRowProps {
   rule:            ExtractedRule
   isPending:       boolean
   onApprove?:      (id: string) => void
+  onUnapprove?:    (id: string) => void
   onReject?:       (id: string) => void
   inConflictGroup?: boolean
 }
@@ -723,7 +733,7 @@ function formatValue(rule: ExtractedRule): string {
   return ''
 }
 
-function RuleRow({ rule, isPending, onApprove, onReject, inConflictGroup }: RuleRowProps) {
+function RuleRow({ rule, isPending, onApprove, onUnapprove, onReject, inConflictGroup }: RuleRowProps) {
   const [detailOpen, setDetailOpen] = useState(false)
   const isAuthoritative = AUTHORITATIVE_RULE_STATUSES.has(rule.status)
   const isRejected   = rule.status === 'rejected'
@@ -789,7 +799,7 @@ function RuleRow({ rule, isPending, onApprove, onReject, inConflictGroup }: Rule
             </div>
           </div>
 
-          {/* Approve / reject — only for active draft extracted rules */}
+          {/* Approve / reject — only for draft extracted rules */}
           {isDraft && rule.sourceKind === 'extracted' && (
             <div className="flex gap-1 shrink-0" onClick={e => e.stopPropagation()}>
               <button
@@ -807,6 +817,21 @@ function RuleRow({ rule, isPending, onApprove, onReject, inConflictGroup }: Rule
                 className="flex h-6 w-6 items-center justify-center rounded border border-red-400/30 bg-red-400/10 text-red-400 hover:bg-red-400/20 disabled:opacity-40 transition-colors"
               >
                 <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+
+          {/* Unapprove — only for authoritative extracted rules (not manual) */}
+          {isAuthoritative && rule.sourceKind !== 'manual' && onUnapprove && (
+            <div className="flex gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+              <button
+                onClick={() => onUnapprove(rule.id)}
+                disabled={isPending}
+                title="Revert to draft"
+                className="flex h-6 items-center gap-1 rounded border border-archai-amber/30 bg-archai-amber/10 px-1.5 text-[10px] text-archai-amber hover:bg-archai-amber/20 disabled:opacity-40 transition-colors"
+              >
+                {isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                Unapprove
               </button>
             </div>
           )}

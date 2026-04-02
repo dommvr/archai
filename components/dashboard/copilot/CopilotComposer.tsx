@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
-import { Send, Paperclip, Loader2, X, Image, Camera } from 'lucide-react'
+import { useState, useRef, useCallback, useEffect } from 'react'
+import { Send, Paperclip, Loader2, X, Camera } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import type { PendingAttachmentMeta } from '@/types'
 
 interface StagedAttachment {
   /** Local object URL for preview (revoked after upload). */
@@ -14,7 +15,7 @@ interface StagedAttachment {
 }
 
 interface CopilotComposerProps {
-  onSend: (content: string, attachmentIds: string[]) => void
+  onSend: (content: string, attachmentIds: string[], pendingAttachments: PendingAttachmentMeta[]) => void
   disabled: boolean
   sending: boolean
   projectId: string
@@ -42,11 +43,23 @@ export function CopilotComposer({
       e?.preventDefault()
       if (!canSend) return
 
-      const readyAttachmentIds = attachments
-        .filter((a) => a.attachmentId)
-        .map((a) => a.attachmentId!)
+      const readyAttachments = attachments.filter((a) => a.attachmentId)
+      const readyAttachmentIds = readyAttachments.map((a) => a.attachmentId!)
+      const pendingMeta: PendingAttachmentMeta[] = readyAttachments.map((a) => ({
+        attachmentId: a.attachmentId!,
+        filename: a.file.name,
+        mimeType: a.file.type,
+        // Pass the previewUrl — it must stay valid until the send response
+        // replaces the optimistic message with a server-issued signed URL.
+        previewUrl: a.previewUrl,
+        isImage: a.file.type.startsWith('image/'),
+      }))
 
-      onSend(input.trim(), readyAttachmentIds)
+      // Call onSend — previewUrls stay alive in the optimistic message until the
+      // server response replaces them with signed URLs. The browser GCs the blob
+      // references once the optimistic message is replaced and nothing holds them.
+      onSend(input.trim(), readyAttachmentIds, pendingMeta)
+
       setInput('')
       setAttachments([])
       setUploadError(null)
@@ -90,14 +103,16 @@ export function CopilotComposer({
       const staged: StagedAttachment = { previewUrl, file }
       setAttachments((prev) => [...prev, staged])
 
-      // Upload in the background
+      // Upload in the background.
+      // Do NOT revoke previewUrl here — it must stay valid for the optimistic
+      // message thumbnail until the send response replaces it with a signed URL.
+      // Revocation happens in handleSubmit after onSend is called.
       uploadAttachment(file, previewUrl, threadId, projectId).then((attachmentId) => {
         setAttachments((prev) =>
           prev.map((a) =>
             a.previewUrl === previewUrl ? { ...a, attachmentId } : a
           )
         )
-        URL.revokeObjectURL(previewUrl)
       }).catch(() => {
         setUploadError(`Failed to upload ${file.name}`)
         setAttachments((prev) => prev.filter((a) => a.previewUrl !== previewUrl))
@@ -122,7 +137,7 @@ export function CopilotComposer({
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {attachments.map((att) => (
-            <AttachmentChip
+            <StagedAttachmentPreview
               key={att.previewUrl}
               attachment={att}
               onRemove={() => removeAttachment(att.previewUrl)}
@@ -216,7 +231,16 @@ export function CopilotComposer({
   )
 }
 
-function AttachmentChip({
+/**
+ * Previews a staged (pre-send) attachment in the composer.
+ *
+ * Images: show a 56×56 thumbnail with a click-to-enlarge lightbox.
+ *         A spinning overlay indicates the upload is still in progress.
+ * Files:  show a filename pill (same as before).
+ *
+ * The remove button always appears on hover.
+ */
+function StagedAttachmentPreview({
   attachment,
   onRemove,
 }: {
@@ -225,7 +249,70 @@ function AttachmentChip({
 }) {
   const isImage = attachment.file.type.startsWith('image/')
   const isReady = Boolean(attachment.attachmentId)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
 
+  if (isImage) {
+    return (
+      <>
+        <div className="relative group/thumb shrink-0">
+          {/* Thumbnail — click to open lightbox */}
+          <button
+            type="button"
+            onClick={() => setLightboxOpen(true)}
+            className={cn(
+              'relative w-14 h-14 rounded border overflow-hidden block',
+              isReady
+                ? 'border-archai-orange/30 hover:border-archai-orange/60'
+                : 'border-archai-graphite',
+              'transition-colors',
+            )}
+            aria-label={`Preview ${attachment.file.name}`}
+            title={attachment.file.name}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={attachment.previewUrl}
+              alt={attachment.file.name}
+              className="w-full h-full object-cover"
+            />
+            {/* Uploading spinner overlay */}
+            {!isReady && (
+              <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                <Loader2 className="h-3 w-3 text-white animate-spin" />
+              </div>
+            )}
+          </button>
+
+          {/* Remove button — top-right corner, visible on hover */}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onRemove() }}
+            className={cn(
+              'absolute -top-1 -right-1 w-4 h-4 rounded-full',
+              'bg-archai-charcoal border border-archai-graphite',
+              'flex items-center justify-center',
+              'opacity-0 group-hover/thumb:opacity-100 transition-opacity',
+              'text-muted-foreground/70 hover:text-white',
+            )}
+            aria-label={`Remove ${attachment.file.name}`}
+          >
+            <X className="h-2.5 w-2.5" />
+          </button>
+        </div>
+
+        {/* Inline lightbox for this staged image */}
+        {lightboxOpen && (
+          <ComposerImageLightbox
+            src={attachment.previewUrl}
+            filename={attachment.file.name}
+            onClose={() => setLightboxOpen(false)}
+          />
+        )}
+      </>
+    )
+  }
+
+  // Non-image: filename pill
   return (
     <div
       className={cn(
@@ -235,11 +322,7 @@ function AttachmentChip({
           : 'border-archai-graphite text-muted-foreground/60'
       )}
     >
-      {isImage ? (
-        <Image className="h-2.5 w-2.5" />
-      ) : (
-        <Paperclip className="h-2.5 w-2.5" />
-      )}
+      <Paperclip className="h-2.5 w-2.5 shrink-0" />
       <span className="max-w-[100px] truncate">{attachment.file.name}</span>
       {!isReady && <Loader2 className="h-2 w-2 animate-spin ml-0.5" />}
       <button
@@ -250,6 +333,58 @@ function AttachmentChip({
       >
         <X className="h-2.5 w-2.5" />
       </button>
+    </div>
+  )
+}
+
+/**
+ * Fullscreen lightbox for a composer-staged image (before send).
+ * Identical behaviour to the one in CopilotMessageList but scoped here
+ * so the two components remain independently maintainable.
+ */
+function ComposerImageLightbox({
+  src,
+  filename,
+  onClose,
+}: {
+  src: string
+  filename: string
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Preview: ${filename}`}
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute top-4 right-4 p-1.5 rounded bg-archai-charcoal/80 text-white hover:text-archai-orange transition-colors"
+        aria-label="Close preview"
+      >
+        <X className="h-4 w-4" />
+      </button>
+      <div className="flex flex-col items-center gap-3 max-w-full max-h-full">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={filename}
+          className="max-w-full max-h-[80vh] rounded shadow-2xl object-contain"
+          onClick={(e) => e.stopPropagation()}
+        />
+        <p className="text-[10px] text-muted-foreground/70 truncate max-w-[300px]">
+          {filename}
+        </p>
+      </div>
     </div>
   )
 }
@@ -321,7 +456,7 @@ async function captureTabScreenshot(
         setAttachments((prev) =>
           prev.map((a) => (a.previewUrl === previewUrl ? { ...a, attachmentId } : a))
         )
-        URL.revokeObjectURL(previewUrl)
+        // Do not revoke previewUrl here — stays valid for the optimistic thumbnail.
       })
       .catch(() => {
         setUploadError('Failed to upload screenshot')

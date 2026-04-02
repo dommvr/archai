@@ -11,6 +11,7 @@ import {
   ChevronUp,
   Plus,
   RefreshCw,
+  Calculator,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -34,7 +35,7 @@ interface SpeckleModelPickerProps {
   onAssignExisting:  (modelRefId: string) => Promise<void>
   modelRef?:         SpeckleModelRef | null
   geometrySnapshot?: GeometrySnapshot | null
-  /** The current run — used to detect failed syncs and show the error. */
+  /** The current run — used to detect failed syncs, show errors, and read run_metrics. */
   run?:              PrecheckRun | null
   isLoading?:        boolean
   /**
@@ -42,6 +43,8 @@ interface SpeckleModelPickerProps {
    * in the project library picker.
    */
   defaultModelRef?:  { streamId: string; versionId: string; branchName?: string; modelName?: string } | null
+  /** Called after compute-run-metrics succeeds so the parent can refresh the run. */
+  onRunMetricsComputed?: (updatedRun: PrecheckRun) => void
 }
 
 export function SpeckleModelPicker({
@@ -54,6 +57,7 @@ export function SpeckleModelPicker({
   run,
   isLoading,
   defaultModelRef,
+  onRunMetricsComputed,
 }: SpeckleModelPickerProps) {
   // Project model library
   const [projectModels, setProjectModels]   = useState<SpeckleModelRef[]>([])
@@ -61,11 +65,12 @@ export function SpeckleModelPicker({
   const [activeRefId,   setActiveRefId]     = useState<string | null>(null)
 
   // UI state
-  const [showChangePanel, setShowChangePanel] = useState(false) // visible when modelRef exists and user wants to switch
-  const [showNewForm,     setShowNewForm]     = useState(false) // raw ID form for syncing a new model
-  const [submitting,      setSubmitting]      = useState(false)
-  const [reviewOpen,      setReviewOpen]      = useState(false)
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
+  const [showChangePanel,  setShowChangePanel]  = useState(false) // visible when modelRef exists and user wants to switch
+  const [showNewForm,      setShowNewForm]      = useState(false) // raw ID form for syncing a new model
+  const [submitting,       setSubmitting]       = useState(false)
+  const [reviewOpen,       setReviewOpen]       = useState(false)
+  const [diagnosticsOpen,  setDiagnosticsOpen]  = useState(false)
+  const [computingMetrics, setComputingMetrics] = useState(false)
 
   // New-model form fields
   const [streamId,   setStreamId]   = useState('')
@@ -141,6 +146,16 @@ export function SpeckleModelPicker({
     }
   }
 
+  async function handleComputeRunMetrics() {
+    setComputingMetrics(true)
+    try {
+      const updatedRun = await precheckApi.computeRunMetrics({ runId })
+      onRunMetricsComputed?.(updatedRun)
+    } finally {
+      setComputingMetrics(false)
+    }
+  }
+
   const isSyncing = Boolean(isLoading || submitting)
   const syncFailed = modelRef != null && run?.status === 'failed'
 
@@ -175,7 +190,8 @@ export function SpeckleModelPicker({
 
     const heightMetric = geometrySnapshot?.metrics?.find((m) => m.key === 'building_height_m') ?? null
     const gfaMetric    = geometrySnapshot?.metrics?.find((m) => m.key === 'gross_floor_area_m2') ?? null
-    const farMetric    = geometrySnapshot?.metrics?.find((m) => m.key === 'far') ?? null
+    // FAR is a run-specific metric (requires parcel area) — read from run.runMetrics, not snapshot
+    const runFar = (run?.runMetrics as Record<string, unknown> | null | undefined)?.far as number | null | undefined
 
     const heightDiag = (
       (geometrySnapshot?.rawMetrics?.metric_derivation as Record<string, unknown> | undefined)
@@ -221,7 +237,8 @@ export function SpeckleModelPicker({
       return null
     })()
 
-    const hasReviewContent = hasMetrics && (heightMetric != null || gfaMetric != null || farMetric != null || unitConverted || unitWarnings.length > 0 || extractionNotes.length > 0)
+    // Show "Review metrics" toggle whenever model metrics exist (run metrics section always appears inside)
+    const hasReviewContent = hasMetrics && (heightMetric != null || gfaMetric != null || unitConverted || unitWarnings.length > 0 || extractionNotes.length > 0 || true)
 
     return (
       <>
@@ -458,19 +475,51 @@ export function SpeckleModelPicker({
               </div>
             )}
 
-            {/* FAR */}
-            {farMetric && (
-              <div className="space-y-1 border-t border-archai-graphite pt-2">
-                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Floor Area Ratio</p>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-sm font-semibold text-white">{farMetric.value.toFixed(2)}</span>
-                  <span className="text-muted-foreground">FAR</span>
-                </div>
-                {farMetric.computationNotes && (
-                  <p className="text-muted-foreground/60">{farMetric.computationNotes}</p>
+            {/* Run metrics section — FAR and future site-context-dependent metrics */}
+            <div className="space-y-1.5 border-t border-archai-graphite pt-2">
+              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Run Metrics
+                <span className="ml-1 normal-case text-muted-foreground/40 tracking-normal font-normal">(site-context dependent)</span>
+              </p>
+
+              {/* FAR */}
+              <div className="space-y-1">
+                <p className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">Floor Area Ratio</p>
+                {runFar != null ? (
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-sm font-semibold text-white">{runFar.toFixed(3)}</span>
+                    <span className="text-muted-foreground">FAR</span>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-muted-foreground/50 leading-snug">
+                    Run metrics not computed yet. Use the <span className="text-archai-amber/70">Compute run metrics</span> button above to calculate FAR and other site-context checks.
+                  </p>
                 )}
               </div>
-            )}
+
+              {/* Lot coverage placeholder */}
+              <div className="space-y-0.5">
+                <p className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">Lot Coverage</p>
+                <p className="text-[10px] text-muted-foreground/40 leading-snug">
+                  Requires site boundary polygon — not yet implemented.
+                </p>
+              </div>
+
+              {/* Secondary compute button inside the panel for convenience */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 text-[10px] px-2 border-archai-graphite bg-transparent text-muted-foreground hover:text-white"
+                disabled={computingMetrics || !modelRef || !run}
+                onClick={() => void handleComputeRunMetrics()}
+              >
+                {computingMetrics
+                  ? <><Loader2 className="h-3 w-3 animate-spin mr-1" />Computing…</>
+                  : <><Calculator className="h-3 w-3 mr-1" />{runFar != null ? 'Recompute run metrics' : 'Compute run metrics'}</>
+                }
+              </Button>
+            </div>
 
             {/* Diagnostics */}
             {(unitWarnings.length > 0 || extractionNotes.length > 0) && (

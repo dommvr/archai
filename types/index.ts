@@ -181,6 +181,8 @@ export interface CopilotMessage {
   /** UI snapshot at send time (currentPage, activeRunId, selectedObjectIds). */
   uiContext?: CopilotUiContext | null
   createdAt: string
+  /** Attachments linked to this message (populated by list_messages). */
+  attachments?: CopilotAttachment[]
 }
 
 /** Context snapshot captured from the frontend at message send time. */
@@ -208,6 +210,16 @@ export interface CopilotAttachment {
   /** Rich metadata: page, run, selected objects, etc. */
   contextMetadata: Record<string, unknown> | null
   createdAt: string
+  /**
+   * Short-lived signed read URL for the file in Supabase Storage.
+   * Populated server-side when serving message history; never persisted to DB.
+   */
+  signedUrl?: string | null
+  /**
+   * Local blob URL for immediate preview before the file is in Storage.
+   * Set only on optimistic (in-memory) attachment objects — never persisted.
+   */
+  _previewUrl?: string
 }
 
 /** Payload sent from the frontend when the user submits a message. */
@@ -215,6 +227,20 @@ export interface CopilotSendMessagePayload {
   content: string
   uiContext?: CopilotUiContext
   attachmentIds?: string[]
+}
+
+/**
+ * Metadata for an attachment that has been uploaded but not yet persisted
+ * as part of a message. Passed from the composer to useCopilot.sendMessage
+ * to populate the optimistic user message with immediate previews.
+ */
+export interface PendingAttachmentMeta {
+  attachmentId: string
+  filename: string
+  mimeType: string
+  /** Local object URL for immediate image preview (revoked after message is sent). */
+  previewUrl?: string
+  isImage: boolean
 }
 
 /** Response shape from POST /api/copilot/threads/[id]/messages */

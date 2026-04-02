@@ -176,7 +176,7 @@ class CopilotRepository:
     async def list_messages(
         self,
         thread_id: UUID,
-        limit: int = 50,
+        limit: int = 100,
         offset: int = 0,
     ) -> list[CopilotMessage]:
         result = (
@@ -187,7 +187,41 @@ class CopilotRepository:
             .range(offset, offset + limit - 1)
             .execute()
         )
-        return [CopilotMessage.model_validate(row) for row in result.data]
+        messages = [CopilotMessage.model_validate(row) for row in result.data]
+        log.debug(
+            "list_messages: thread=%s offset=%d limit=%d returned=%d",
+            thread_id, offset, limit, len(messages),
+        )
+
+        # Fetch all attachments for this thread in a single query, then
+        # bucket them by message_id so rendering has O(1) lookup per message.
+        # Generate signed read URLs for image attachments so the frontend can
+        # render thumbnails directly without an extra round-trip.
+        if messages:
+            att_result = (
+                await self._db.table("copilot_attachments")
+                .select("*")
+                .eq("thread_id", str(thread_id))
+                .not_.is_("message_id", "null")
+                .order("created_at", desc=False)
+                .execute()
+            )
+            att_by_msg: dict[str, list[CopilotAttachment]] = {}
+            for row in att_result.data:
+                mid = str(row.get("message_id", ""))
+                if not mid:
+                    continue
+                att = CopilotAttachment.model_validate(row)
+                att_type = row.get("attachment_type", "")
+                mime = row.get("mime_type", "") or ""
+                is_image = att_type in ("image", "screenshot") or mime.startswith("image/")
+                if is_image and att.storage_path:
+                    att.signed_url = await self.create_signed_read_url(att.storage_path)
+                att_by_msg.setdefault(mid, []).append(att)
+            for msg in messages:
+                msg.attachments = att_by_msg.get(str(msg.id), [])
+
+        return messages
 
     async def get_recent_messages(
         self,
@@ -325,6 +359,28 @@ class CopilotRepository:
             .execute()
         )
         return [CopilotAttachment.model_validate(row) for row in result.data]
+
+    async def get_attachments_by_ids_resolved(
+        self, attachment_ids: list[UUID]
+    ) -> list[CopilotAttachment]:
+        """
+        Like get_attachments_by_ids but also generates signed read URLs for
+        image attachments so the frontend can render thumbnails immediately
+        after send without waiting for a page reload.
+        """
+        rows = await self.get_attachments_by_ids(attachment_ids)
+        for att in rows:
+            att_type = att.attachment_type.value if att.attachment_type else ""
+            mime = att.mime_type or ""
+            is_image = att_type in ("image", "screenshot") or mime.startswith("image/")
+            if is_image and att.storage_path:
+                att.signed_url = await self.create_signed_read_url(att.storage_path)
+        log.debug(
+            "get_attachments_by_ids_resolved: fetched=%d signed=%d",
+            len(rows),
+            sum(1 for a in rows if a.signed_url),
+        )
+        return rows
 
     async def create_signed_read_url(
         self,

@@ -2,6 +2,7 @@ import type {
   ApproveRuleInput,
   AssignModelRefInput,
   AssignSiteContextInput,
+  ComputeRunMetricsInput,
   CreateManualRuleInput,
   CreateProjectSiteContextInput,
   DeleteProjectSiteContextInput,
@@ -15,6 +16,7 @@ import type {
   IngestDocumentsInput,
   IngestSiteInput,
   PrecheckRun,
+  PrecheckRunSummaryResponse,
   ProjectActiveModelResponse,
   ProjectDefaultSiteContextResponse,
   ProjectDocumentsResponse,
@@ -38,6 +40,7 @@ import {
   GeometrySnapshotSchema,
   GetRunDetailsResponseSchema,
   PrecheckRunSchema,
+  PrecheckRunSummaryResponseSchema,
   ProjectActiveModelResponseSchema,
   ProjectDefaultSiteContextResponseSchema,
   ProjectDocumentsResponseSchema,
@@ -113,12 +116,32 @@ export async function evaluateCompliance(input: EvaluateComplianceInput) {
   })
 }
 
+/** Compute run-specific metrics (FAR, lot_coverage_pct) from model geometry + site context. */
+export async function computeRunMetrics(input: ComputeRunMetricsInput): Promise<PrecheckRun> {
+  const data = await request<PrecheckRun>("/api/agents/precheck", {
+    method: "POST",
+    body: JSON.stringify({ action: "compute_run_metrics", payload: input }),
+  })
+  return PrecheckRunSchema.parse(data)
+}
+
 export async function getRunDetails(
   runId: string,
   init?: Pick<RequestInit, "signal">
 ): Promise<GetRunDetailsResponse> {
   const data = await request<GetRunDetailsResponse>(`/api/agents/precheck?runId=${runId}`, init)
   return GetRunDetailsResponseSchema.parse(data)
+}
+
+export async function getRunSummary(
+  runId: string,
+  init?: Pick<RequestInit, "signal">
+): Promise<PrecheckRunSummaryResponse> {
+  const data = await request<PrecheckRunSummaryResponse>(
+    `/api/agents/precheck?runId=${runId}&scope=summary`,
+    init,
+  )
+  return PrecheckRunSummaryResponseSchema.parse(data)
 }
 
 export async function listProjectRuns(projectId: string): Promise<ProjectRunsResponse> {
@@ -356,6 +379,18 @@ export async function rejectRule(input: RejectRuleInput): Promise<ExtractedRule>
   const data = await request<ExtractedRule>("/api/agents/precheck", {
     method: "POST",
     body: JSON.stringify({ action: "reject_rule", payload: input }),
+  })
+  return ExtractedRuleSchema.parse(data)
+}
+
+/**
+ * Revert an approved extracted rule back to draft (non-authoritative).
+ * Raises 422 for manual rules (they cannot be unapproved).
+ */
+export async function unapproveRule(input: ApproveRuleInput): Promise<ExtractedRule> {
+  const data = await request<ExtractedRule>("/api/agents/precheck", {
+    method: "POST",
+    body: JSON.stringify({ action: "unapprove_rule", payload: input }),
   })
   return ExtractedRuleSchema.parse(data)
 }

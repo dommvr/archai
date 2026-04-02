@@ -1,5 +1,6 @@
 'use client'
 
+import { Fragment } from 'react'
 import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { PrecheckRunStatus } from '@/lib/precheck/constants'
@@ -15,7 +16,8 @@ const STEPS: Step[] = [
   { status: 'ingesting_docs',      label: 'Documents'        },
   { status: 'extracting_rules',    label: 'Rule Extraction'  },
   { status: 'syncing_model',       label: 'Speckle Model'    },
-  { status: 'computing_metrics',   label: 'Metrics'          },
+  { status: 'computing_metrics',   label: 'Model Metrics'    },
+  // run_metrics is a synthetic step not tied to a PrecheckRunStatus — handled separately below
   { status: 'evaluating',          label: 'Compliance'       },
   { status: 'generating_report',   label: 'Report'           },
 ]
@@ -36,6 +38,8 @@ interface StepDataOverrides {
   hasRules?:              boolean
   hasModelRef?:           boolean
   hasGeometrySnapshot?:   boolean
+  hasRunMetrics?:         boolean
+  isComputingRunMetrics?: boolean
 }
 
 /**
@@ -90,25 +94,31 @@ function resolveStepState(
 }
 
 interface PrecheckProgressCardProps {
-  run:                    PrecheckRun | null | undefined
-  hasSiteContext?:        boolean
-  hasDocuments?:          boolean
+  run:                      PrecheckRun | null | undefined
+  hasSiteContext?:          boolean
+  hasDocuments?:            boolean
   /** True when docs are UI-selected but not yet ingested — shows amber spinner. */
-  hasDocumentsPending?:   boolean
-  hasRules?:              boolean
-  hasModelRef?:           boolean
-  hasGeometrySnapshot?:   boolean
-  isLoading?:             boolean
+  hasDocumentsPending?:     boolean
+  hasRules?:                boolean
+  hasModelRef?:             boolean
+  hasGeometrySnapshot?:     boolean
+  /** True when run.runMetrics has been populated. */
+  hasRunMetrics?:           boolean
+  /** True while compute-run-metrics is in flight. */
+  isComputingRunMetrics?:   boolean
+  isLoading?:               boolean
 }
 
 export function PrecheckProgressCard({
   run,
-  hasSiteContext         = false,
-  hasDocuments           = false,
-  hasDocumentsPending    = false,
-  hasRules               = false,
-  hasModelRef            = false,
-  hasGeometrySnapshot    = false,
+  hasSiteContext           = false,
+  hasDocuments             = false,
+  hasDocumentsPending      = false,
+  hasRules                 = false,
+  hasModelRef              = false,
+  hasGeometrySnapshot      = false,
+  hasRunMetrics            = false,
+  isComputingRunMetrics    = false,
   isLoading,
 }: PrecheckProgressCardProps) {
   if (isLoading) {
@@ -157,30 +167,70 @@ export function PrecheckProgressCard({
       <div className="space-y-1.5">
         {STEPS.map(({ status, label }) => {
           const state = resolveStepState(status, run.status, { hasSiteContext, hasDocuments, hasDocumentsPending, hasRules, hasModelRef, hasGeometrySnapshot })
+
+          // Insert the synthetic "Run Metrics" step right after "Model Metrics"
+          const isMetricsStep = status === 'computing_metrics'
+          const runMetricsState: StepState = isComputingRunMetrics
+            ? 'active'
+            : hasRunMetrics
+              ? 'done'
+              : hasGeometrySnapshot
+                ? 'idle'  // model metrics ready but run metrics not yet computed
+                : 'idle'
+
           return (
-            <div key={status} className="flex items-center gap-2">
-              <div className={cn(
-                'w-4 h-4 flex items-center justify-center shrink-0',
-                state === 'done'   && 'text-emerald-400',
-                state === 'active' && 'text-archai-amber',
-                state === 'error'  && 'text-red-400',
-                state === 'idle'   && 'text-muted-foreground/25',
-              )}>
-                {state === 'done'   && <CheckCircle2 className="h-3.5 w-3.5" />}
-                {state === 'active' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                {state === 'error'  && <AlertCircle className="h-3.5 w-3.5" />}
-                {state === 'idle'   && <div className="h-2 w-2 rounded-full border border-current" />}
+            <Fragment key={status}>
+              <div className="flex items-center gap-2">
+                <div className={cn(
+                  'w-4 h-4 flex items-center justify-center shrink-0',
+                  state === 'done'   && 'text-emerald-400',
+                  state === 'active' && 'text-archai-amber',
+                  state === 'error'  && 'text-red-400',
+                  state === 'idle'   && 'text-muted-foreground/25',
+                )}>
+                  {state === 'done'   && <CheckCircle2 className="h-3.5 w-3.5" />}
+                  {state === 'active' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {state === 'error'  && <AlertCircle className="h-3.5 w-3.5" />}
+                  {state === 'idle'   && <div className="h-2 w-2 rounded-full border border-current" />}
+                </div>
+                <span className={cn(
+                  'text-xs',
+                  state === 'done'   && 'text-white/70',
+                  state === 'active' && 'text-archai-amber font-medium',
+                  state === 'error'  && 'text-red-400',
+                  state === 'idle'   && 'text-muted-foreground/40',
+                )}>
+                  {label}
+                </span>
               </div>
-              <span className={cn(
-                'text-xs',
-                state === 'done'   && 'text-white/70',
-                state === 'active' && 'text-archai-amber font-medium',
-                state === 'error'  && 'text-red-400',
-                state === 'idle'   && 'text-muted-foreground/40',
-              )}>
-                {label}
-              </span>
-            </div>
+
+              {/* Synthetic Run Metrics step — inserted after Model Metrics */}
+              {isMetricsStep && (
+                <div className="flex items-center gap-2">
+                  <div className={cn(
+                    'w-4 h-4 flex items-center justify-center shrink-0',
+                    runMetricsState === 'done'   && 'text-emerald-400',
+                    runMetricsState === 'active' && 'text-archai-amber',
+                    runMetricsState === 'idle'   && (hasGeometrySnapshot ? 'text-archai-amber/40' : 'text-muted-foreground/25'),
+                  )}>
+                    {runMetricsState === 'done'   && <CheckCircle2 className="h-3.5 w-3.5" />}
+                    {runMetricsState === 'active' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {runMetricsState === 'idle'   && <div className="h-2 w-2 rounded-full border border-current" />}
+                  </div>
+                  <span className={cn(
+                    'text-xs',
+                    runMetricsState === 'done'   && 'text-white/70',
+                    runMetricsState === 'active' && 'text-archai-amber font-medium',
+                    runMetricsState === 'idle'   && (hasGeometrySnapshot ? 'text-archai-amber/60' : 'text-muted-foreground/40'),
+                  )}>
+                    Run Metrics
+                    {runMetricsState === 'idle' && hasGeometrySnapshot && (
+                      <span className="ml-1 text-[9px] text-archai-amber/50">· needed</span>
+                    )}
+                  </span>
+                </div>
+              )}
+            </Fragment>
           )
         })}
       </div>

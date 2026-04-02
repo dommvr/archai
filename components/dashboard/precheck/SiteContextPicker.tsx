@@ -14,12 +14,13 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { MapPin, CheckCircle2, ChevronDown, ChevronUp, Plus, Loader2, Star, X } from 'lucide-react'
+import { MapPin, CheckCircle2, ChevronDown, ChevronUp, Plus, Loader2, Star, X, Map, AlertTriangle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import * as precheckApi from '@/lib/precheck/api'
 import type { IngestSiteInput, SiteContext } from '@/lib/precheck/types'
+import type { ParcelSelection } from './SiteContextMapModal'
 
 interface SiteContextPickerProps {
   runId: string
@@ -33,6 +34,14 @@ interface SiteContextPickerProps {
   /** Called when user submits the new site context form. */
   onSubmit: (input: IngestSiteInput) => Promise<void>
   isLoading?: boolean
+  /** Opens the map modal from the parent. Called when user clicks the map icon. */
+  onMapOpen?: () => void
+  /**
+   * If provided, the parent stores the returned setter so it can call
+   * fillFromParcel(parcel) after the map modal confirms a selection.
+   * Usage: onFillRef={(fn) => { fillRef.current = fn }}
+   */
+  onFillRef?: (fill: (parcel: ParcelSelection) => void) => void
 }
 
 /** Display a site context's key fields concisely. */
@@ -52,6 +61,8 @@ export function SiteContextPicker({
   onPickExisting,
   onSubmit,
   isLoading,
+  onMapOpen,
+  onFillRef,
 }: SiteContextPickerProps) {
   const [projectContexts,  setProjectContexts]  = useState<SiteContext[]>([])
   const [defaultContextId, setDefaultContextId] = useState<string | null>(null)
@@ -66,6 +77,10 @@ export function SiteContextPicker({
   const [jurisdictionCode, setJurisdictionCode] = useState('')
   const [zoningDistrict,   setZoningDistrict]   = useState('')
   const [parcelAreaM2,     setParcelAreaM2]     = useState('')
+
+  // Tracks whether the form was pre-filled from the map (but not yet saved).
+  // When true AND siteContext is already saved, show an unsaved-changes warning.
+  const [mapPrefilled,     setMapPrefilled]     = useState(false)
 
   const loadProjectContexts = useCallback(() => {
     if (!projectId) return
@@ -82,10 +97,32 @@ export function SiteContextPicker({
     return () => { cancelled = true }
   }, [projectId])
 
+  /** Fill the new-context form from a map parcel selection. */
+  const fillFromParcel = useCallback((parcel: ParcelSelection) => {
+    setAddress(parcel.address)
+    setMunicipality(parcel.municipality)
+    setJurisdictionCode(parcel.jurisdictionCode)
+    setZoningDistrict('')
+    setParcelAreaM2(parcel.parcelAreaM2 != null ? String(parcel.parcelAreaM2) : '')
+    setMapPrefilled(true)
+    // Auto-open the new form so user can see/edit and hit Save
+    setShowNewForm(true)
+    if (siteContext) {
+      // If there is already a saved context, expand the change panel so the
+      // user can see the new form alongside the unsaved-changes warning.
+      setShowChangePanel(true)
+    }
+  }, [siteContext])
+
   useEffect(() => {
     const cleanup = loadProjectContexts()
     return cleanup
   }, [loadProjectContexts])
+
+  // Register fillFromParcel with the parent so the map modal can call it
+  useEffect(() => {
+    onFillRef?.(fillFromParcel)
+  }, [onFillRef, fillFromParcel])
 
   // Pre-seed new form from project default when it opens
   useEffect(() => {
@@ -127,6 +164,7 @@ export function SiteContextPicker({
       })
       setShowChangePanel(false)
       setShowNewForm(false)
+      setMapPrefilled(false)
       loadProjectContexts()
     } finally {
       setSubmitting(false)
@@ -336,13 +374,42 @@ export function SiteContextPicker({
         {loadingLib && !siteContext && (
           <Loader2 className="h-3 w-3 text-muted-foreground animate-spin ml-auto" />
         )}
-        {siteContext && (
+        {siteContext && !mapPrefilled && (
           <span className="ml-auto text-[10px] text-emerald-400 font-medium">Saved</span>
         )}
-        {!siteContext && projectDefaultSiteContext && (
+        {!siteContext && projectDefaultSiteContext && !mapPrefilled && (
           <span className="ml-auto text-[10px] text-archai-amber font-medium">Default available</span>
         )}
+        {/* Map icon button */}
+        {onMapOpen && (
+          <button
+            type="button"
+            onClick={onMapOpen}
+            title="Open parcel map"
+            aria-label="Open parcel map"
+            className={cn(
+              'ml-auto flex items-center gap-1 text-[10px] rounded border px-2 py-0.5 transition-colors',
+              siteContext
+                ? 'border-archai-orange/40 bg-archai-orange/10 text-archai-orange hover:bg-archai-orange/20'
+                : 'border-archai-graphite text-muted-foreground hover:text-white hover:border-archai-graphite/80',
+            )}
+          >
+            <Map className="h-3 w-3" />
+            Map
+          </button>
+        )}
       </div>
+
+      {/* Unsaved-changes warning — shown after map pre-fill when a context is already saved */}
+      {mapPrefilled && siteContext && (
+        <div className="flex items-start gap-2 rounded-lg border border-archai-amber/30 bg-archai-amber/5 px-3 py-2 -mt-1">
+          <AlertTriangle className="h-3.5 w-3.5 text-archai-amber shrink-0 mt-0.5" />
+          <p className="text-[10px] text-archai-amber/90 leading-snug">
+            Form updated from map. The saved site context has not changed yet —
+            click <strong>Save Site Context</strong> below to apply these values.
+          </p>
+        </div>
+      )}
 
       {/* Pre-fill notice — shown when no run context but project default exists */}
       {!siteContext && projectDefaultSiteContext && !showNewForm && projectContexts.length === 0 && !loadingLib && (
@@ -392,9 +459,13 @@ export function SiteContextPicker({
  */
 interface ProjectDefaultSiteContextPanelProps {
   projectId: string
+  /** Opens the map modal from the parent. */
+  onMapOpen?: () => void
+  /** Called by the parent to pre-fill the form after a map selection. */
+  onFillRef?: (fill: (parcel: ParcelSelection) => void) => void
 }
 
-export function ProjectDefaultSiteContextPanel({ projectId }: ProjectDefaultSiteContextPanelProps) {
+export function ProjectDefaultSiteContextPanel({ projectId, onMapOpen, onFillRef }: ProjectDefaultSiteContextPanelProps) {
   const [contexts,      setContexts]     = useState<SiteContext[]>([])
   const [defaultId,     setDefaultId]    = useState<string | null>(null)
   const [loading,       setLoading]      = useState(true)
@@ -411,6 +482,9 @@ export function ProjectDefaultSiteContextPanel({ projectId }: ProjectDefaultSite
   const [jurisdictionCode, setJurisdictionCode] = useState('')
   const [zoningDistrict,   setZoningDistrict]   = useState('')
   const [parcelAreaM2,     setParcelAreaM2]     = useState('')
+
+  // Tracks whether the form was pre-filled from the map (but not yet saved)
+  const [mapPrefilled, setMapPrefilled] = useState(false)
 
   const reload = useCallback(() => {
     let cancelled = false
@@ -429,6 +503,22 @@ export function ProjectDefaultSiteContextPanel({ projectId }: ProjectDefaultSite
   useEffect(() => {
     return reload()
   }, [reload])
+
+  // fillFromParcel — called by parent after map modal confirms a selection
+  const fillFromParcel = useCallback((parcel: ParcelSelection) => {
+    setAddress(parcel.address)
+    setMunicipality(parcel.municipality)
+    setJurisdictionCode(parcel.jurisdictionCode)
+    setZoningDistrict('')
+    setParcelAreaM2(parcel.parcelAreaM2 != null ? String(parcel.parcelAreaM2) : '')
+    setMapPrefilled(true)
+    setShowNewForm(true)
+    setExpanded(true)
+  }, [])
+
+  useEffect(() => {
+    onFillRef?.(fillFromParcel)
+  }, [onFillRef, fillFromParcel])
 
   async function handleSetDefault(ctxId: string) {
     if (settingId) return
@@ -481,6 +571,7 @@ export function ProjectDefaultSiteContextPanel({ projectId }: ProjectDefaultSite
       setAddress(''); setMunicipality(''); setJurisdictionCode('')
       setZoningDistrict(''); setParcelAreaM2('')
       setShowNewForm(false)
+      setMapPrefilled(false)
       reload()
     } catch {
       setError('Failed to create site context.')
@@ -499,34 +590,64 @@ export function ProjectDefaultSiteContextPanel({ projectId }: ProjectDefaultSite
 
   return (
     <div className="rounded-lg border border-archai-graphite bg-archai-black/40">
-      <button
-        type="button"
-        className="w-full flex items-center gap-3 px-4 py-3 text-left"
-        onClick={() => { setExpanded((v) => !v); setShowNewForm(false) }}
-      >
-        <MapPin className={cn('h-4 w-4 shrink-0', defaultCtx ? 'text-emerald-400' : 'text-muted-foreground')} />
-        <div className="flex-1 min-w-0">
-          {defaultCtx ? (
-            <>
-              <p className="text-xs font-medium text-white truncate">{siteContextLabel(defaultCtx)}</p>
-              <p className="text-[10px] text-muted-foreground/60 mt-0.5">Default site context</p>
-            </>
-          ) : (
-            <>
-              <p className="text-xs font-medium text-muted-foreground">No default site context</p>
-              <p className="text-[10px] text-muted-foreground/60 mt-0.5">
-                Click to add or choose a default site context
-              </p>
-            </>
-          )}
-        </div>
-        {expanded ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                  : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
-      </button>
+      <div className="flex items-center">
+        <button
+          type="button"
+          className="flex-1 flex items-center gap-3 px-4 py-3 text-left min-w-0"
+          onClick={() => { setExpanded((v) => !v); setShowNewForm(false) }}
+        >
+          <MapPin className={cn('h-4 w-4 shrink-0', defaultCtx ? 'text-emerald-400' : 'text-muted-foreground')} />
+          <div className="flex-1 min-w-0">
+            {defaultCtx ? (
+              <>
+                <p className="text-xs font-medium text-white truncate">{siteContextLabel(defaultCtx)}</p>
+                <p className="text-[10px] text-muted-foreground/60 mt-0.5">Default site context</p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs font-medium text-muted-foreground">No default site context</p>
+                <p className="text-[10px] text-muted-foreground/60 mt-0.5">
+                  Click to add or choose a default site context
+                </p>
+              </>
+            )}
+          </div>
+          {expanded ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
+        </button>
+        {/* Map icon button */}
+        {onMapOpen && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onMapOpen() }}
+            title="Open parcel map"
+            aria-label="Open parcel map"
+            className={cn(
+              'shrink-0 flex items-center gap-1 text-[10px] rounded border mr-3 px-2 py-0.5 transition-colors',
+              defaultCtx
+                ? 'border-archai-orange/40 bg-archai-orange/10 text-archai-orange hover:bg-archai-orange/20'
+                : 'border-archai-graphite text-muted-foreground hover:text-white hover:border-archai-graphite/80',
+            )}
+          >
+            <Map className="h-3 w-3" />
+            Map
+          </button>
+        )}
+      </div>
 
       {expanded && (
         <div className="border-t border-archai-graphite px-4 pb-3 pt-2 space-y-2">
           {error && <p className="text-[10px] text-red-400">{error}</p>}
+
+          {/* Unsaved-changes warning after map pre-fill */}
+          {mapPrefilled && (
+            <div className="flex items-start gap-2 rounded-lg border border-archai-amber/30 bg-archai-amber/5 px-3 py-2">
+              <AlertTriangle className="h-3.5 w-3.5 text-archai-amber shrink-0 mt-0.5" />
+              <p className="text-[10px] text-archai-amber/90 leading-snug">
+                Form updated from map. Click <strong>Save as Default</strong> below to persist these values.
+              </p>
+            </div>
+          )}
 
           {/* Existing contexts */}
           {contexts.length > 0 && (
