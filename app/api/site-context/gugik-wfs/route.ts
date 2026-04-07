@@ -133,10 +133,13 @@ async function handleParcels(params: URLSearchParams) {
   const [x2180, y2180] = lngLatToEPSG2180(lngNum, latNum)
   console.log(`[gugik-wfs] parcels coord: lng=${lngNum} lat=${latNum} → easting=${x2180.toFixed(2)} northing=${y2180.toFixed(2)}`)
 
+  // Request teryt — full TERYT cadastral identifier (e.g. "0226021.0001.24/35")
+  // Required for the parcel report PDF endpoint (pdfReport?numer=...)
+  // // COUNTRY: Poland
   const uldkParams = new URLSearchParams({
     request: 'GetParcelByXY',
     xy: `${x2180},${y2180}`,
-    result: 'geom_wkt,parcel,region,commune,county,voivodeship',
+    result: 'geom_wkt,parcel,region,commune,county,voivodeship,teryt',
     srid: '4326',
   })
 
@@ -193,16 +196,19 @@ async function handleParcels(params: URLSearchParams) {
 
     const features: object[] = []
     // status === 0 means success — parse lines[1+]
+    // Field order: geom_wkt|parcel|region|commune|county|voivodeship|teryt
+    // // COUNTRY: Poland
     for (let i = 1; i < lines.length; i++) {
       const parts = lines[i].split('|')
       if (parts.length < 6) continue
-      const [geomPart, parcelId, region, commune, county, voivodeship] = parts
+      const [geomPart, parcelId, region, commune, county, voivodeship, teryt] = parts
       const feature = wktToGeoJSONFeature(geomPart ?? '', {
-        parcelId: parcelId ?? '',
-        region:   region ?? '',
-        municipality: commune ?? '',    // gmina
-        district:     county ?? '',     // powiat
-        province:     voivodeship ?? '', // województwo
+        parcelId:     parcelId     ?? '',
+        region:       region       ?? '',
+        municipality: commune      ?? '',  // gmina
+        district:     county       ?? '',  // powiat
+        province:     voivodeship  ?? '',  // województwo
+        teryt:        teryt        ?? '',  // full TERYT cadastral id — used for pdfReport
       })
       if (feature) features.push(feature)
     }

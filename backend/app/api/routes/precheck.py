@@ -44,6 +44,7 @@ Next.js integration mapping:
   POST   /precheck/rules/{rule_id}/approve      ← action: "approve_rule"
   POST   /precheck/rules/{rule_id}/reject       ← action: "reject_rule"
   PATCH  /precheck/rules/{rule_id}              ← action: "update_manual_rule"
+  DELETE /precheck/rules/{rule_id}              ← action: "delete_manual_rule"
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi.responses import Response
 
 from app.core.auth import AuthenticatedUser
 from app.core.dependencies import (
@@ -69,6 +71,9 @@ from app.core.schemas import (
     AssignSiteContextRequest,
     AsyncActionResponse,
     CheckResultStatus,
+    ChecklistSummarySection,
+    ComplianceResultRow,
+    ComplianceSummarySection,
     CreateManualRuleRequest,
     CreatePrecheckRunRequest,
     CreateProjectSiteContextRequest,
@@ -77,6 +82,8 @@ from app.core.schemas import (
     GetRunDetailsResponse,
     IngestDocumentsRequest,
     IngestSiteRequest,
+    IssueSeverity,
+    IssueSummarySection,
     OkResponse,
     PrecheckRun,
     PrecheckRunSummaryResponse,
@@ -88,6 +95,7 @@ from app.core.schemas import (
     ProjectSiteContextsResponse,
     RegisterDocumentRequest,
     RegisterProjectDocumentRequest,
+    RunReportData,
     ScoreContext,
     SetActiveProjectModelRequest,
     SetDefaultSiteContextRequest,
@@ -103,6 +111,7 @@ from app.repositories.precheck_repository import PrecheckRepository
 from app.services.compliance_engine import ComplianceEngineService, compute_readiness_breakdown
 from app.services.document_ingestion import DocumentIngestionService
 from app.services.realtime_publisher import RealtimePublisher
+from app.services.report_generator import generate_report_pdf
 from app.services.rule_extraction import RuleExtractionService
 from app.services.site_data_provider import SiteDataProviderService
 from app.services.speckle_service import SpeckleService
@@ -267,6 +276,230 @@ async def get_run_summary(
         ),
         is_stale=run.is_stale,
         rules_changed_at=run.rules_changed_at,
+    )
+
+
+# ════════════════════════════════════════════════════════════
+# GET /precheck/runs/{run_id}/report-data
+# Full structured report payload — same data drives on-screen
+# summary and the PDF export.  No LLM, fully deterministic.
+# ════════════════════════════════════════════════════════════
+
+_METRIC_LABELS_REPORT: dict[str, str] = {
+    "building_height_m":       "Building height",
+    "front_setback_m":         "Front setback",
+    "side_setback_left_m":     "Left side setback",
+    "side_setback_right_m":    "Right side setback",
+    "rear_setback_m":          "Rear setback",
+    "far":                     "Floor area ratio (FAR)",
+    "lot_coverage_pct":        "Lot coverage",
+    "parking_spaces_required": "Required parking spaces",
+    "parking_spaces_provided": "Provided parking spaces",
+    "gross_floor_area_m2":     "Gross floor area",
+}
+
+_AUTHORITATIVE_STATUSES_REPORT = {"reviewed", "approved", "auto_approved", "manual"}
+
+
+async def _build_report_data(
+    run_id: UUID,
+    repo: PrecheckRepository,
+) -> RunReportData:
+    """
+    Shared helper used by both the JSON report-data endpoint and the PDF
+    endpoint, so they always produce identical content.
+    """
+    run = await _require_run(repo, run_id)
+
+    site_context = (
+        await repo.get_site_context(run.site_context_id)
+        if run.site_context_id else None
+    )
+    model_ref = (
+        await repo.get_speckle_model_ref(run.speckle_model_ref_id)
+        if run.speckle_model_ref_id else None
+    )
+    rules     = await repo.get_rules_for_run(run_id)
+    checks    = await repo.get_checks_for_run(run_id)
+    issues    = await repo.get_issues_for_run(run_id)
+    checklist = await repo.get_checklist_for_run(run_id)
+
+    # ── Authoritative rules (mirrors authority filter in get_run_details) ──
+    authoritative_rules = [
+        r for r in rules if r.status.value in _AUTHORITATIVE_STATUSES_REPORT
+    ]
+    has_reviewed = bool(authoritative_rules)
+
+    # ── Readiness breakdown ────────────────────────────────────────────────
+    snapshot = await repo.get_latest_geometry_snapshot(run_id)
+    score_ctx = ScoreContext(
+        has_parcel_data=bool(site_context and site_context.parcel_area_m2),
+        has_zoning_data=bool(site_context and site_context.zoning_district),
+        has_reviewed_rules=has_reviewed,
+        has_geometry_snapshot=bool(snapshot),
+    )
+    resolved_count = sum(1 for c in checklist if c.resolved)
+    breakdown = compute_readiness_breakdown(
+        issues=issues,
+        context=score_ctx,
+        authoritative_rule_count=len(authoritative_rules),
+        checklist_total=len(checklist),
+        checklist_resolved=resolved_count,
+    )
+
+    # ── Build rule lookup for check→rule join ──────────────────────────────
+    rules_by_id = {r.id: r for r in rules}
+
+    # ── Compliance result rows (one per check) ─────────────────────────────
+    compliance_results: list[ComplianceResultRow] = []
+    for chk in checks:
+        rule = rules_by_id.get(chk.rule_id)
+        metric_key_str = chk.metric_key.value if chk.metric_key else None
+        compliance_results.append(ComplianceResultRow(
+            check_id=chk.id,
+            rule_id=chk.rule_id,
+            rule_code=rule.rule_code if rule else None,
+            rule_title=rule.title if rule else None,
+            metric_key=chk.metric_key,
+            metric_label=_METRIC_LABELS_REPORT.get(metric_key_str, metric_key_str) if metric_key_str else None,
+            status=chk.status,
+            actual_value=chk.actual_value,
+            expected_value=chk.expected_value,
+            expected_min=chk.expected_min,
+            expected_max=chk.expected_max,
+            units=chk.units,
+            explanation=chk.explanation,
+            source_kind=rule.source_kind if rule else None,
+            citation_section=(
+                rule.citation.section if rule and rule.citation else None
+            ),
+            citation_page=(
+                rule.citation.page if rule and rule.citation else None
+            ),
+            description=rule.description if rule else None,
+            condition_text=rule.condition_text if rule else None,
+            exception_text=rule.exception_text if rule else None,
+            normalization_note=rule.normalization_note if rule else None,
+            citation_snippet=(
+                rule.citation.snippet if rule and rule.citation else None
+            ),
+        ))
+
+    # Sort: failed first, then ambiguous/missing_input, then pass
+    _STATUS_ORDER = {
+        CheckResultStatus.FAIL:          0,
+        CheckResultStatus.AMBIGUOUS:     1,
+        CheckResultStatus.MISSING_INPUT: 2,
+        CheckResultStatus.PASS:          3,
+        CheckResultStatus.NOT_APPLICABLE:4,
+    }
+    compliance_results.sort(key=lambda r: _STATUS_ORDER.get(r.status, 9))
+
+    # ── Compliance summary counts ──────────────────────────────────────────
+    compliance_summary = ComplianceSummarySection(
+        total=len(checks),
+        passed=sum(1 for c in checks if c.status == CheckResultStatus.PASS),
+        failed=sum(1 for c in checks if c.status == CheckResultStatus.FAIL),
+        warning=sum(1 for c in checks if c.status == CheckResultStatus.AMBIGUOUS),
+        not_evaluable=sum(1 for c in checks if c.status == CheckResultStatus.MISSING_INPUT),
+    )
+
+    # ── Issue summary counts ───────────────────────────────────────────────
+    issue_summary = IssueSummarySection(
+        total=len(issues),
+        critical=sum(1 for i in issues if i.severity == IssueSeverity.CRITICAL),
+        error=sum(1 for i in issues if i.severity == IssueSeverity.ERROR),
+        warning=sum(1 for i in issues if i.severity == IssueSeverity.WARNING),
+        info=sum(1 for i in issues if i.severity == IssueSeverity.INFO),
+    )
+
+    # Top issues for report: all, ordered by severity (already sorted by repo)
+    top_issues = issues[:20]
+
+    # ── Checklist summary ──────────────────────────────────────────────────
+    checklist_summary = ChecklistSummarySection(
+        total=len(checklist),
+        resolved=resolved_count,
+        unresolved=len(checklist) - resolved_count,
+    )
+
+    return RunReportData(
+        run_id=run_id,
+        run_name=run.name,
+        run_status=run.status,
+        run_created_at=run.created_at,
+        is_stale=run.is_stale,
+        rules_changed_at=run.rules_changed_at,
+        address=site_context.address if site_context else None,
+        municipality=site_context.municipality if site_context else None,
+        jurisdiction_code=site_context.jurisdiction_code if site_context else None,
+        zoning_district=site_context.zoning_district if site_context else None,
+        model_name=model_ref.model_name if model_ref else None,
+        model_stream_id=model_ref.stream_id if model_ref else None,
+        model_synced_at=model_ref.synced_at if model_ref else None,
+        readiness=breakdown,
+        compliance_summary=compliance_summary,
+        compliance_results=compliance_results,
+        issue_summary=issue_summary,
+        top_issues=top_issues,
+        checklist_summary=checklist_summary,
+        checklist_items=checklist,
+        authoritative_rule_count=len(authoritative_rules),
+    )
+
+
+@router.get("/runs/{run_id}/report-data", response_model=RunReportData)
+async def get_run_report_data(
+    run_id: UUID,
+    user:   AuthenticatedUser  = Depends(get_current_user),
+    repo:   PrecheckRepository = Depends(get_repository),
+) -> RunReportData:
+    """
+    Returns the full structured report payload for a run.
+    Used by the frontend ComplianceSummaryTab (on-screen view) and
+    consumed by the PDF endpoint — both derive from the same data.
+
+    Maps to: lib/precheck/api.ts → getRunReportData()
+    Next.js seam: GET /api/agents/precheck?runId=&scope=report_data
+    """
+    return await _build_report_data(run_id, repo)
+
+
+@router.get("/runs/{run_id}/report.pdf")
+async def download_run_report_pdf(
+    run_id: UUID,
+    user:   AuthenticatedUser  = Depends(get_current_user),
+    repo:   PrecheckRepository = Depends(get_repository),
+) -> Response:
+    """
+    Generates and streams a PDF compliance report for a run.
+    Content is identical to the report-data JSON endpoint — no drift possible.
+
+    The PDF is generated on demand (not cached) from live backend data.
+    If the run is stale, the PDF is still generated but includes a prominent
+    stale warning in the header and disclaimer sections.
+
+    Maps to: lib/precheck/api.ts → downloadRunReportPdf()
+    Next.js seam: GET /api/agents/precheck?runId=&scope=report_pdf
+    """
+    report_data = await _build_report_data(run_id, repo)
+    pdf_bytes = generate_report_pdf(report_data)
+
+    # Sanitise run name for use in Content-Disposition filename.
+    # Format: "{run_name} - summary.pdf"
+    # Keep alphanumerics, spaces, hyphens, underscores, dots; replace others with "_".
+    raw_name = report_data.run_name or f"run-{str(run_id)[:8]}"
+    safe_name_str = "".join(c if c.isalnum() or c in "-_ ." else "_" for c in raw_name)
+    safe_name_str = safe_name_str.strip() or "compliance-report"
+    filename = f"{safe_name_str} - summary.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(pdf_bytes)),
+        },
     )
 
 
@@ -1483,6 +1716,35 @@ async def update_manual_rule(
         raise HTTPException(code, detail=msg) from exc
     log.info("Manual rule %s updated by user=%s", rule_id, user.user_id)
     return rule
+
+
+# ════════════════════════════════════════════════════════════
+# DELETE /precheck/rules/{rule_id}
+# Hard-delete a manual rule (source_kind='manual' only).
+# Extracted rules must be rejected via /reject, not deleted.
+# ════════════════════════════════════════════════════════════
+
+@router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_manual_rule(
+    rule_id: UUID,
+    user:    AuthenticatedUser    = Depends(get_current_user),
+    svc:     RuleExtractionService = Depends(get_rule_extraction),
+) -> None:
+    """
+    Hard-deletes a manual rule.
+    Returns 403 if the rule is AI-extracted (source_kind='extracted').
+    Returns 404 if the rule does not exist.
+    Marks all evaluated runs for the project as stale.
+    Maps to: lib/precheck/api.ts → deleteManualRule()
+             Next.js seam: action "delete_manual_rule"
+    """
+    try:
+        await svc.delete_manual_rule(rule_id)
+    except ValueError as exc:
+        msg = str(exc)
+        code = status.HTTP_403_FORBIDDEN if "not a manual rule" in msg else status.HTTP_404_NOT_FOUND
+        raise HTTPException(code, detail=msg) from exc
+    log.info("Manual rule %s deleted by user=%s", rule_id, user.user_id)
 
 
 # ════════════════════════════════════════════════════════════

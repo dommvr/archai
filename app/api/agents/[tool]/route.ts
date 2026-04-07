@@ -27,6 +27,7 @@ import {
   SyncProjectModelInputSchema,
   SyncSpeckleModelInputSchema,
   UpdateManualRuleInputSchema,
+  DeleteManualRuleInputSchema,
 } from '@/lib/precheck/schemas'
 
 type PrecheckAction =
@@ -56,6 +57,7 @@ type PrecheckAction =
   | 'reject_rule'
   | 'create_manual_rule'
   | 'update_manual_rule'
+  | 'delete_manual_rule'
   | 'set_extraction_options'
 
 type PrecheckPayload = Record<string, unknown>
@@ -558,6 +560,19 @@ async function handlePrecheckPost(
       })
     }
 
+    case 'delete_manual_rule': {
+      const parsed = validatePayload(DeleteManualRuleInputSchema, payload)
+      if (parsed instanceof NextResponse) {
+        return parsed
+      }
+
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/rules/${parsed.ruleId}`,
+        method: 'DELETE',
+      })
+    }
+
     case 'set_extraction_options': {
       const parsed = validatePayload(SetProjectExtractionOptionsInputSchema, payload)
       if (parsed instanceof NextResponse) {
@@ -590,6 +605,19 @@ async function handlePrecheckGet(request: NextRequest, accessToken: string) {
         accessToken,
         path: `/precheck/runs/${runId}/summary`,
         method: 'GET',
+      })
+    }
+    if (scope === 'report_data') {
+      return proxyFastApi({
+        accessToken,
+        path: `/precheck/runs/${runId}/report-data`,
+        method: 'GET',
+      })
+    }
+    if (scope === 'report_pdf') {
+      return proxyFastApiBinary({
+        accessToken,
+        path: `/precheck/runs/${runId}/report.pdf`,
       })
     }
     return proxyFastApi({
@@ -751,6 +779,47 @@ async function proxyFastApi(input: {
     status: response.status,
     headers: { 'Content-Type': contentType },
   })
+}
+
+/**
+ * Proxy a binary response (e.g. PDF) from FastAPI to the client.
+ * Unlike proxyFastApi, this reads the raw ArrayBuffer and forwards
+ * the Content-Disposition header so the browser triggers a download.
+ */
+async function proxyFastApiBinary(input: {
+  accessToken: string
+  path: string
+}) {
+  const baseUrl = getFastApiBaseUrl()
+  if (!baseUrl) {
+    return NextResponse.json(
+      { error: 'FastAPI backend URL is not configured' },
+      { status: 500 }
+    )
+  }
+
+  const response = await fetch(`${baseUrl}${input.path}`, {
+    method: 'GET',
+    headers: { 'Authorization': `Bearer ${input.accessToken}` },
+    cache: 'no-store',
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    return NextResponse.json(
+      { error: text || `Backend returned ${response.status}` },
+      { status: response.status }
+    )
+  }
+
+  const buffer = await response.arrayBuffer()
+  const contentType = response.headers.get('content-type') ?? 'application/octet-stream'
+  const contentDisposition = response.headers.get('content-disposition') ?? ''
+
+  const headers: Record<string, string> = { 'Content-Type': contentType }
+  if (contentDisposition) headers['Content-Disposition'] = contentDisposition
+
+  return new NextResponse(buffer, { status: 200, headers })
 }
 
 function getFastApiBaseUrl() {

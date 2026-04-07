@@ -41,6 +41,8 @@ import {
   ExternalLink,
   ChevronDown,
   ChevronUp,
+  Globe,
+  BadgeCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -50,6 +52,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import type { SuggestedZoningDocument, DocClassification } from '@/lib/precheck/types'
 // Mapbox CSS — must be imported at module level so Next.js bundles it before
 // the map container mounts. CDN link tags in JSX are not reliable for this.
 import 'mapbox-gl/dist/mapbox-gl.css'
@@ -64,8 +67,10 @@ export interface ParcelSelection {
   province: string
   jurisdictionCode: string
   parcelId: string
-  /** Cadastral precinct (obręb) code from ULDK — used to construct parcel report URL */
+  /** Cadastral precinct (obręb) code from ULDK */
   region: string
+  /** Full TERYT cadastral identifier from ULDK (e.g. "0226021.0001.24/35") — used for pdfReport */
+  teryt: string
   parcelAreaM2: number | undefined
   centroid: { lat: number; lng: number }
   /** GeoJSON Polygon in EPSG:4326 */
@@ -140,6 +145,26 @@ function StatusBanner({ type, message, onDismiss }: BannerProps) {
 
 // ── Zoning documents panel ────────────────────────────────────────────────────
 
+// Human-readable labels for each classification — shown as compact badges
+// // COUNTRY: Poland
+const CLASSIFICATION_LABELS: Record<DocClassification, string> = {
+  ADOPTED_PLAN_TEXT:      'Plan text',
+  PLAN_DRAWING_ANNEX:     'Drawing annex',
+  PLAN_GENERAL_TEXT:      'General plan',
+  OFFICIAL_JOURNAL_COPY:  'Official journal',
+  JUSTIFICATION:          'Justification',
+  ENVIRONMENTAL_FORECAST: 'Env. forecast',
+}
+
+const CLASSIFICATION_COLOURS: Record<DocClassification, string> = {
+  ADOPTED_PLAN_TEXT:      'text-emerald-400 border-emerald-400/30 bg-emerald-400/10',
+  PLAN_DRAWING_ANNEX:     'text-sky-400 border-sky-400/30 bg-sky-400/10',
+  PLAN_GENERAL_TEXT:      'text-archai-amber border-archai-amber/30 bg-archai-amber/10',
+  OFFICIAL_JOURNAL_COPY:  'text-violet-400 border-violet-400/30 bg-violet-400/10',
+  JUSTIFICATION:          'text-muted-foreground border-archai-graphite/60 bg-archai-black/30',
+  ENVIRONMENTAL_FORECAST: 'text-muted-foreground border-archai-graphite/60 bg-archai-black/30',
+}
+
 interface ZoningDocPanelProps {
   projectId: string
   docs: ZoningDocument[]
@@ -149,54 +174,107 @@ interface ZoningDocPanelProps {
   checked: boolean | null
   /** true when the geoportal endpoint is unavailable — show info not error */
   unavailable?: boolean
+  /** Suggested online documents from /api/site-context/suggested-docs */
+  suggestedDocs: SuggestedZoningDocument[]
+  suggestedLoading: boolean
+  suggestedError: string | null
 }
 
-function ZoningDocPanel({ projectId, docs, loading, error, checked, unavailable }: ZoningDocPanelProps) {
-  const [uploadingIdx, setUploadingIdx] = useState<number | null>(null)
-  const [uploadedIdx,  setUploadedIdx]  = useState<Set<number>>(new Set())
+function ZoningDocPanel({
+  projectId,
+  docs,
+  loading,
+  error,
+  checked,
+  unavailable,
+  suggestedDocs,
+  suggestedLoading,
+  suggestedError,
+}: ZoningDocPanelProps) {
+  const [uploadingKey, setUploadingKey] = useState<string | null>(null)
+  const [uploadedKeys, setUploadedKeys] = useState<Set<string>>(new Set())
   const [uploadError,  setUploadError]  = useState<string | null>(null)
-  const [expanded, setExpanded] = useState(true)
+  const [expanded,     setExpanded]     = useState(true)
 
-  async function handleAddToProject(doc: ZoningDocument, idx: number) {
-    if (uploadingIdx !== null) return
-    setUploadingIdx(idx)
+  // ── Upload helper — shared between geoportal docs and suggested docs ─────
+
+  async function handleAddToProject(url: string, title: string, key: string) {
+    if (uploadingKey !== null) return
+    setUploadingKey(key)
     setUploadError(null)
     try {
-      const params = new URLSearchParams({
-        url: doc.url,
-        mode: 'upload',
-        projectId,
-        fileName: doc.title,
-      })
+      const params = new URLSearchParams({ url, mode: 'upload', projectId, fileName: title })
       const res = await fetch(`/api/site-context/fetch-document?${params.toString()}`)
       if (!res.ok) {
         const body = await res.json() as { error?: string }
         throw new Error(body.error ?? `Upload failed (${res.status})`)
       }
-      setUploadedIdx((prev) => new Set([...prev, idx]))
+      setUploadedKeys((prev) => new Set([...prev, key]))
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Upload failed')
     } finally {
-      setUploadingIdx(null)
+      setUploadingKey(null)
     }
   }
 
-  function handleView(doc: ZoningDocument) {
-    const params = new URLSearchParams({ url: doc.url, mode: 'stream' })
+  function handleView(url: string) {
+    const params = new URLSearchParams({ url, mode: 'stream' })
     window.open(`/api/site-context/fetch-document?${params.toString()}`, '_blank')
   }
 
-  function handleDownload(doc: ZoningDocument) {
-    const params = new URLSearchParams({
-      url: doc.url,
-      mode: 'stream',
-      fileName: doc.title,
-    })
+  function handleDownload(url: string, title: string) {
+    const params = new URLSearchParams({ url, mode: 'stream', fileName: title })
     const a = document.createElement('a')
     a.href = `/api/site-context/fetch-document?${params.toString()}`
-    a.download = doc.title.endsWith('.pdf') ? doc.title : `${doc.title}.pdf`
+    a.download = title.endsWith('.pdf') ? title : `${title}.pdf`
     a.click()
   }
+
+  // ── Doc action row — reused for both geoportal and suggested docs ────────
+
+  function DocActions({ url, title, keyId }: { url: string; title: string; keyId: string }) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => handleView(url)}
+          className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-white transition-colors border border-archai-graphite/60 rounded px-1.5 py-0.5"
+        >
+          <Eye className="h-3 w-3" />
+          View
+        </button>
+        <button
+          type="button"
+          onClick={() => handleDownload(url, title)}
+          className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-white transition-colors border border-archai-graphite/60 rounded px-1.5 py-0.5"
+        >
+          <Download className="h-3 w-3" />
+          Download
+        </button>
+        {uploadedKeys.has(keyId) ? (
+          <span className="flex items-center gap-1 text-[10px] text-emerald-400">
+            <CheckCircle2 className="h-3 w-3" />
+            Added
+          </span>
+        ) : (
+          <button
+            type="button"
+            disabled={uploadingKey !== null}
+            onClick={() => void handleAddToProject(url, title, keyId)}
+            className="flex items-center gap-1 text-[10px] text-archai-orange hover:text-archai-amber transition-colors border border-archai-orange/30 rounded px-1.5 py-0.5 disabled:opacity-50"
+          >
+            {uploadingKey === keyId
+              ? <Loader2 className="h-3 w-3 animate-spin" />
+              : <Paperclip className="h-3 w-3" />}
+            Add to project
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  const totalFound = docs.length + suggestedDocs.length
+  const anyLoading = loading || suggestedLoading
 
   return (
     <div className="rounded-lg border border-archai-graphite bg-archai-charcoal overflow-hidden">
@@ -208,11 +286,11 @@ function ZoningDocPanel({ projectId, docs, loading, error, checked, unavailable 
       >
         <FileText className="h-3.5 w-3.5 text-archai-orange shrink-0" />
         <p className="text-xs font-medium text-white flex-1">Zoning Documents (MPZP)</p>
-        {loading && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
-        {!loading && checked !== null && docs.length > 0 && (
-          <span className="text-[10px] font-medium text-emerald-400 shrink-0">{docs.length} found</span>
+        {anyLoading && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+        {!anyLoading && totalFound > 0 && (
+          <span className="text-[10px] font-medium text-emerald-400 shrink-0">{totalFound} found</span>
         )}
-        {!loading && checked === false && (
+        {!anyLoading && checked === false && suggestedDocs.length === 0 && (
           <span className="text-[10px] text-muted-foreground shrink-0">None found</span>
         )}
         {expanded ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -220,109 +298,170 @@ function ZoningDocPanel({ projectId, docs, loading, error, checked, unavailable 
       </button>
 
       {expanded && (
-        <div className="border-t border-archai-graphite px-3 pb-3 pt-2 space-y-2">
-          {loading && (
-            <div className="space-y-1.5">
-              {[0, 1].map((i) => (
-                <div key={i} className="h-10 rounded bg-archai-black/60 animate-pulse" />
-              ))}
-            </div>
-          )}
+        <div className="border-t border-archai-graphite px-3 pb-3 pt-2 space-y-3">
 
-          {unavailable && (
-            // Known Polish geoportal limitation — not a user-actionable error
-            // // COUNTRY: Poland
-            <div className="flex items-start gap-1.5 text-[10px] text-muted-foreground">
-              <Info className="h-3 w-3 shrink-0 mt-0.5" />
-              <span>Zoning document check is currently unavailable. <a href="https://mapy.geoportal.gov.pl" target="_blank" rel="noopener noreferrer" className="text-archai-orange hover:underline">Check manually at geoportal.gov.pl</a></span>
-            </div>
-          )}
-
-          {error && !unavailable && (
-            <div className="flex items-start gap-1.5 text-[10px] text-archai-amber/80">
-              <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          {!loading && checked === false && !error && (
-            <div className="py-1 space-y-1">
-              <p className="text-[11px] text-muted-foreground">
-                No zoning plan (MPZP) found for this parcel.
+          {/* ── Section 1: Geoportal WMS results ──────────────────────────── */}
+          {(loading || docs.length > 0 || unavailable || (error && !unavailable)) && (
+            <div className="space-y-2">
+              <p className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                Geoportal
               </p>
-              {/* // COUNTRY: Poland */}
-              <a
-                href="https://mapy.geoportal.gov.pl"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-[10px] text-archai-orange hover:underline"
-              >
-                Check manually on geoportal.gov.pl
-                <ExternalLink className="h-2.5 w-2.5" />
-              </a>
+
+              {loading && (
+                <div className="space-y-1.5">
+                  {[0, 1].map((i) => (
+                    <div key={i} className="h-10 rounded bg-archai-black/60 animate-pulse" />
+                  ))}
+                </div>
+              )}
+
+              {unavailable && (
+                // Known Polish geoportal limitation — not a user-actionable error
+                // // COUNTRY: Poland
+                <div className="flex items-start gap-1.5 text-[10px] text-muted-foreground">
+                  <Info className="h-3 w-3 shrink-0 mt-0.5" />
+                  <span>
+                    Geoportal check unavailable.{' '}
+                    <a href="https://mapy.geoportal.gov.pl" target="_blank" rel="noopener noreferrer" className="text-archai-orange hover:underline">
+                      Check manually
+                    </a>
+                  </span>
+                </div>
+              )}
+
+              {error && !unavailable && (
+                <div className="flex items-start gap-1.5 text-[10px] text-archai-amber/80">
+                  <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              {!loading && checked === false && !error && !unavailable && (
+                <div className="py-0.5 space-y-1">
+                  <p className="text-[11px] text-muted-foreground">No plan found on Geoportal.</p>
+                  {/* // COUNTRY: Poland */}
+                  <a
+                    href="https://mapy.geoportal.gov.pl"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[10px] text-archai-orange hover:underline"
+                  >
+                    Check on geoportal.gov.pl
+                    <ExternalLink className="h-2.5 w-2.5" />
+                  </a>
+                </div>
+              )}
+
+              {!loading && docs.length > 0 && (
+                <div className="space-y-1.5">
+                  {docs.map((doc, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded-lg border border-archai-graphite/60 bg-archai-black/40 px-3 py-2 space-y-1.5"
+                    >
+                      <p className="text-[11px] font-medium text-white leading-snug">{doc.title}</p>
+                      {doc.area && (
+                        <p className="text-[10px] text-muted-foreground">{doc.area}</p>
+                      )}
+                      <DocActions url={doc.url} title={doc.title} keyId={`geo-${idx}`} />
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {!loading && docs.length > 0 && (
-            <div className="space-y-1.5">
-              {docs.map((doc, idx) => (
-                <div
-                  key={idx}
-                  className="rounded-lg border border-archai-graphite/60 bg-archai-black/40 px-3 py-2 space-y-1.5"
-                >
-                  <p className="text-[11px] font-medium text-white leading-snug">{doc.title}</p>
-                  {doc.area && (
-                    <p className="text-[10px] text-muted-foreground">{doc.area}</p>
-                  )}
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => handleView(doc)}
-                      className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-white transition-colors border border-archai-graphite/60 rounded px-1.5 py-0.5"
-                    >
-                      <Eye className="h-3 w-3" />
-                      View
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDownload(doc)}
-                      className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-white transition-colors border border-archai-graphite/60 rounded px-1.5 py-0.5"
-                    >
-                      <Download className="h-3 w-3" />
-                      Download
-                    </button>
-                    {uploadedIdx.has(idx) ? (
-                      <span className="flex items-center gap-1 text-[10px] text-emerald-400">
-                        <CheckCircle2 className="h-3 w-3" />
-                        Added
+          {/* ── Section 2: Suggested online documents ─────────────────────── */}
+          {/* // COUNTRY: Poland — official domain discovery via search */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5">
+              <p className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 flex-1">
+                Suggested online documents
+              </p>
+              <Globe className="h-2.5 w-2.5 text-muted-foreground/40" />
+            </div>
+
+            {suggestedLoading && (
+              <div className="space-y-1.5">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-14 rounded bg-archai-black/60 animate-pulse" />
+                ))}
+              </div>
+            )}
+
+            {suggestedError && !suggestedLoading && (
+              <div className="flex items-start gap-1.5 text-[10px] text-muted-foreground">
+                <Info className="h-3 w-3 shrink-0 mt-0.5" />
+                <span>{suggestedError}</span>
+              </div>
+            )}
+
+            {!suggestedLoading && !suggestedError && suggestedDocs.length === 0 && checked !== null && (
+              <p className="text-[10px] text-muted-foreground">
+                No official online documents found for this location.
+              </p>
+            )}
+
+            {!suggestedLoading && suggestedDocs.length > 0 && (
+              <div className="space-y-1.5">
+                {suggestedDocs.map((doc) => (
+                  <div
+                    key={doc.id}
+                    className="rounded-lg border border-archai-graphite/60 bg-archai-black/40 px-3 py-2 space-y-1.5"
+                  >
+                    {/* Title row */}
+                    <p className="text-[11px] font-medium text-white leading-snug">{doc.title}</p>
+
+                    {/* Classification badge + source */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className={cn(
+                        'inline-flex items-center rounded border px-1 py-px text-[9px] font-medium leading-none',
+                        CLASSIFICATION_COLOURS[doc.classification],
+                      )}>
+                        {CLASSIFICATION_LABELS[doc.classification]}
                       </span>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={uploadingIdx !== null}
-                        onClick={() => void handleAddToProject(doc, idx)}
-                        className="flex items-center gap-1 text-[10px] text-archai-orange hover:text-archai-amber transition-colors border border-archai-orange/30 rounded px-1.5 py-0.5 disabled:opacity-50"
+                      <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground/70">
+                        <BadgeCheck className="h-2.5 w-2.5 text-emerald-400/70 shrink-0" />
+                        {doc.sourceAuthority ?? doc.sourceDomain}
+                      </span>
+                    </div>
+
+                    {/* Source page link (when not a direct PDF) */}
+                    {doc.sourcePageUrl && (
+                      <a
+                        href={doc.sourcePageUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-archai-amber transition-colors"
                       >
-                        {uploadingIdx === idx
-                          ? <Loader2 className="h-3 w-3 animate-spin" />
-                          : <Paperclip className="h-3 w-3" />}
-                        Add to project
-                      </button>
+                        <ExternalLink className="h-2.5 w-2.5" />
+                        Source page
+                      </a>
+                    )}
+
+                    {/* Actions */}
+                    <DocActions url={doc.pdfUrl} title={doc.title} keyId={doc.id} />
+
+                    {/* Confidence + reasons — subtle, collapsed by default */}
+                    {doc.reasons.length > 0 && (
+                      <p className="text-[9px] text-muted-foreground/50 leading-snug">
+                        {doc.reasons.join(' · ')}
+                      </p>
                     )}
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
+                ))}
+              </div>
+            )}
+
+            {checked === null && !suggestedLoading && suggestedDocs.length === 0 && (
+              <p className="text-[10px] text-muted-foreground">
+                Select a parcel to discover online documents.
+              </p>
+            )}
+          </div>
 
           {uploadError && (
             <p className="text-[10px] text-red-400 leading-snug">{uploadError}</p>
-          )}
-
-          {checked === null && !loading && (
-            <p className="text-[10px] text-muted-foreground">
-              Select a parcel to check for zoning documents.
-            </p>
           )}
         </div>
       )}
@@ -360,13 +499,19 @@ export function SiteContextMapModal({
   const [selectedParcel, setSelectedParcel] = useState<ParcelSelection | null>(null)
   const [banner,         setBanner]         = useState<{ type: BannerProps['type']; message: string } | null>(null)
 
-  // Zoning documents state
+  // Zoning documents state — Geoportal WMS results
   const [zoningDocs,        setZoningDocs]        = useState<ZoningDocument[]>([])
   const [zoningLoading,     setZoningLoading]     = useState(false)
   const [zoningError,       setZoningError]       = useState<string | null>(null)
   const [zoningUnavailable, setZoningUnavailable] = useState(false)
   // null = not checked yet; false = checked, none found; true = found
   const [zoningChecked,     setZoningChecked]     = useState<boolean | null>(null)
+
+  // Suggested online documents state — /api/site-context/suggested-docs
+  // // COUNTRY: Poland
+  const [suggestedDocs,    setSuggestedDocs]    = useState<SuggestedZoningDocument[]>([])
+  const [suggestedLoading, setSuggestedLoading] = useState(false)
+  const [suggestedError,   setSuggestedError]   = useState<string | null>(null)
 
   // Parcel report state
   const [reportLoading, setReportLoading] = useState(false)
@@ -439,14 +584,23 @@ export function SiteContextMapModal({
       const firstFeature = geojson.features[0]
       if (firstFeature?.properties) {
         const p = firstFeature.properties as Record<string, string>
-        setSelectedParcel((prev) => prev ? {
-          ...prev,
-          parcelId:     p.parcelId     ?? prev.parcelId,
-          region:       p.region       ?? prev.region,
-          municipality: p.municipality ?? prev.municipality,
-          district:     p.district     ?? prev.district,
-          province:     p.province     ?? prev.province,
-        } : prev)
+        // Always merge ULDK fields — even when prev is null (first click before
+        // handleLocationSelected's final setSelectedParcel has fired). If prev is
+        // null we write a partial object; handleLocationSelected's updater will
+        // spread the rest (address, centroid, etc.) on top immediately after.
+        setSelectedParcel((prev) => ({
+          address:         prev?.address         ?? '',
+          municipality:    p.municipality || prev?.municipality || '',
+          district:        p.district     || prev?.district     || '',
+          province:        p.province     || prev?.province     || '',
+          jurisdictionCode: prev?.jurisdictionCode ?? '',
+          parcelId:        p.parcelId     || prev?.parcelId     || '',
+          region:          p.region       || prev?.region       || '',
+          teryt:           p.teryt        || prev?.teryt        || '',
+          parcelAreaM2:    prev?.parcelAreaM2,
+          centroid:        prev?.centroid ?? { lat: 0, lng: 0 },
+          parcelBoundary:  prev?.parcelBoundary,
+        }))
       }
 
     } catch {
@@ -517,6 +671,49 @@ export function SiteContextMapModal({
       setLoadingJuris(false)
     }
   }, [showJurisdiction])
+
+  // ── Suggested online document discovery ──────────────────────────────────
+  // Uses /api/site-context/suggested-docs with structured location context.
+  // Called in parallel with checkMpzpAt after a parcel is selected.
+  // // COUNTRY: Poland
+
+  const fetchSuggestedDocs = useCallback(async (parcel: ParcelSelection) => {
+    setSuggestedLoading(true)
+    setSuggestedError(null)
+    setSuggestedDocs([])
+
+    try {
+      const params = new URLSearchParams()
+      if (parcel.municipality) params.set('municipality', parcel.municipality)
+      // Do NOT split the address string as a locality — the first token is a street
+      // name or house number, not a district/locality name, and injecting it into
+      // search queries produces junk results (e.g. "MPZP Chmielna 69 Warszawa").
+      // The region (obręb) code is a cleaner jurisdiction hint; locality is left
+      // empty here. If a dedicated locality/district field is ever resolved from
+      // geocoder context, pass it as a separate param.
+      // // COUNTRY: Poland
+      if (parcel.district)     params.set('district',     parcel.district)
+      if (parcel.province)     params.set('province',     parcel.province)
+      if (parcel.parcelId)     params.set('parcelId',     parcel.parcelId)
+      if (parcel.region)       params.set('region',       parcel.region)
+      if (parcel.address)      params.set('address',      parcel.address)
+
+      const res = await fetch(`/api/site-context/suggested-docs?${params.toString()}`)
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string }
+        setSuggestedError(body.error ?? 'Could not fetch suggested documents.')
+        return
+      }
+
+      const data = await res.json() as { docs?: SuggestedZoningDocument[] }
+      setSuggestedDocs(data.docs ?? [])
+    } catch {
+      setSuggestedError('Could not fetch suggested documents.')
+    } finally {
+      setSuggestedLoading(false)
+    }
+  }, [])
 
   // ── MPZP document lookup ──────────────────────────────────────────────────
   // // COUNTRY: Poland
@@ -657,20 +854,61 @@ export function SiteContextMapModal({
     // Do NOT replace the full object — fetchParcelsAt runs concurrently and may
     // have already written parcelId/region/municipality; overwriting with a fresh
     // object would wipe those fields and hide the parcel report button.
-    setSelectedParcel((prev) => ({
+    const finalParcel: ParcelSelection = {
       address,
       // Prefer richer municipality from ULDK (set by fetchParcelsAt) if available
-      municipality: prev?.municipality || municipality,
-      district:      prev?.district     ?? '',
-      province:      prev?.province     ?? '',
+      municipality:    '',  // will be filled from setSelectedParcel callback below
+      district:        '',
+      province:        '',
       jurisdictionCode: '',
-      parcelId:      prev?.parcelId     ?? '',
-      region:        prev?.region       ?? '',
-      parcelAreaM2:  prev?.parcelAreaM2,
+      parcelId:        '',
+      region:          '',
+      teryt:           '',
+      parcelAreaM2:    undefined,
       centroid: { lat, lng },
-      parcelBoundary: prev?.parcelBoundary,
-    }))
-  }, [fetchParcelsAt, fetchJurisdictionAt, checkMpzpAt])
+      parcelBoundary: undefined,
+    }
+
+    setSelectedParcel((prev) => {
+      const merged: ParcelSelection = {
+        address,
+        municipality:     prev?.municipality    || municipality,
+        district:         prev?.district        ?? '',
+        province:         prev?.province        ?? '',
+        jurisdictionCode: '',
+        parcelId:         prev?.parcelId        ?? '',
+        region:           prev?.region          ?? '',
+        teryt:            prev?.teryt           ?? '',
+        parcelAreaM2:     prev?.parcelAreaM2,
+        centroid: { lat, lng },
+        parcelBoundary:   prev?.parcelBoundary,
+      }
+      // Kick off suggested-doc discovery using the merged parcel context.
+      // We call it here (inside the updater) so it uses the final resolved values.
+      // Fire-and-forget — result lands in suggestedDocs state asynchronously.
+      // // COUNTRY: Poland
+      Object.assign(finalParcel, merged)
+      return merged
+    })
+
+    // fetchSuggestedDocs needs the merged parcel — because setSelectedParcel is async
+    // we build the merged object from the same inputs and call it directly.
+    // The municipality may still be empty if ULDK hasn't resolved yet; the
+    // address fallback in the route handler covers that case.
+    void fetchSuggestedDocs({
+      address,
+      municipality:     municipality,
+      district:         '',
+      province:         '',
+      jurisdictionCode: '',
+      parcelId:         '',
+      region:           '',
+      teryt:            '',
+      parcelAreaM2:     undefined,
+      centroid: { lat, lng },
+      parcelBoundary:   undefined,
+    })
+  }, [fetchParcelsAt, fetchJurisdictionAt, checkMpzpAt, fetchSuggestedDocs])
 
   // When a GUGIK parcel feature is clicked, extract its metadata
   const handleParcelFeatureClick = useCallback((
@@ -707,6 +945,7 @@ export function SiteContextMapModal({
       jurisdictionCode: '',
       parcelId,
       region: obreb,
+      teryt: '',
       parcelAreaM2: parcelArea,
       centroid: { lat, lng },
       parcelBoundary,
@@ -717,24 +956,40 @@ export function SiteContextMapModal({
   // // COUNTRY: Poland — GUGIK parcel report PDF via ULDK pdfReport endpoint
 
   const handleDownloadReport = useCallback(async () => {
-    if (!selectedParcel?.parcelId || !selectedParcel.region) return
+    if (!selectedParcel?.teryt) return
+
     setReportLoading(true)
     setReportError(null)
+
     try {
       const params = new URLSearchParams({
-        parcelId: selectedParcel.parcelId,
-        region:   selectedParcel.region,
+        teryt: selectedParcel.teryt,
       })
+
       const res = await fetch(`/api/site-context/parcel-report?${params.toString()}`)
+
       if (!res.ok) {
-        setReportError('Report unavailable — view on geoportal.gov.pl')
+        const body = await res.json().catch(() => ({})) as { reason?: string }
+
+        if (body.reason === 'not_found') {
+          setReportError('No report found for this parcel — view on geoportal.gov.pl')
+        } else {
+          setReportError('Report unavailable — view on geoportal.gov.pl')
+        }
         return
       }
+
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
-      window.open(url, '_blank')
-      // Revoke after a short delay to allow the tab to load the blob
-      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `parcel-report-${selectedParcel.teryt.replace(/[^0-9A-Za-z_.-]/g, '_')}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch {
       setReportError('Report unavailable — view on geoportal.gov.pl')
     } finally {
@@ -882,6 +1137,8 @@ export function SiteContextMapModal({
         setZoningChecked(null)
         setZoningUnavailable(false)
         setReportError(null)
+        setSuggestedDocs([])
+        setSuggestedError(null)
       }
     }
     // Intentionally only runs on open change + initial coords
@@ -1078,7 +1335,7 @@ export function SiteContextMapModal({
 
               {/* Parcel report — only shown when a parcel with ID+region is selected */}
               {/* // COUNTRY: Poland — GUGIK official parcel report PDF */}
-              {selectedParcel?.parcelId && selectedParcel.region && (
+              {selectedParcel?.teryt && (
                 <div className="space-y-1.5">
                   <button
                     type="button"
@@ -1116,7 +1373,7 @@ export function SiteContextMapModal({
                 </div>
               )}
 
-              {/* Zoning documents */}
+              {/* Zoning documents — Geoportal WMS + suggested online docs */}
               <ZoningDocPanel
                 projectId={projectId}
                 docs={zoningDocs}
@@ -1124,6 +1381,9 @@ export function SiteContextMapModal({
                 error={zoningError}
                 checked={zoningChecked}
                 unavailable={zoningUnavailable}
+                suggestedDocs={suggestedDocs}
+                suggestedLoading={suggestedLoading}
+                suggestedError={suggestedError}
               />
             </div>
 

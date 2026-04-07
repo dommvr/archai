@@ -1002,6 +1002,19 @@ class PrecheckRepository:
         )
         return ExtractedRule.model_validate(result.data[0])
 
+    async def hard_delete_rule(self, rule_id: UUID) -> None:
+        """
+        Hard-deletes a single rule row by id.
+        Only called for manual rules — extracted rules are rejected (soft), not deleted.
+        Caller is responsible for ensuring the rule is manual before calling this.
+        """
+        await (
+            self._db.table("extracted_rules")
+            .delete()
+            .eq("id", str(rule_id))
+            .execute()
+        )
+
     async def get_rules_in_conflict_group(
         self, conflict_group_id: UUID
     ) -> list[ExtractedRule]:

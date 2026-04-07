@@ -561,6 +561,27 @@ class RuleExtractionService:
         log.info("Created manual rule %s for project=%s", stored.id, project_id)
         return stored
 
+    # ── delete_manual_rule ────────────────────────────────────
+
+    async def delete_manual_rule(self, rule_id: UUID) -> None:
+        """
+        Hard-deletes a manual rule.
+        Raises ValueError if the rule is not found or is not a manual rule.
+        Also marks all evaluated runs for the project as stale, since removing
+        an active rule changes the compliance picture.
+        """
+        rule = await self._repo.get_rule_by_id(rule_id)
+        if rule is None:
+            raise ValueError(f"Rule {rule_id} not found")
+        if rule.source_kind != RuleSourceKind.MANUAL:
+            raise ValueError(
+                f"Rule {rule_id} is not a manual rule and cannot be deleted this way. "
+                "Reject extracted rules via the reject endpoint instead."
+            )
+        await self._repo.hard_delete_rule(rule_id)
+        await self._mark_project_stale(rule.project_id)
+        log.info("Deleted manual rule %s for project=%s", rule_id, rule.project_id)
+
     # ── update_manual_rule ────────────────────────────────────
 
     async def update_manual_rule(

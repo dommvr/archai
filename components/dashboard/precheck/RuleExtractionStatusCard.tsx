@@ -8,9 +8,11 @@ import {
   ChevronUp,
   GitMerge,
   Loader2,
+  Pencil,
   Plus,
   Search,
   Sparkles,
+  Trash2,
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -127,16 +129,20 @@ function labelFromCondition(raw: string | null | undefined): string | null {
 // ── Types ────────────────────────────────────────────────────
 
 interface RuleExtractionStatusCardProps {
-  runId:           string
-  rules:           ExtractedRule[]
-  canExtract:      boolean
-  onExtract:       () => Promise<void>
-  onApprove?:      (ruleId: string) => Promise<void>
-  onUnapprove?:    (ruleId: string) => Promise<void>
-  onReject?:       (ruleId: string) => Promise<void>
-  onAddManual?:    () => void
-  isLoading?:      boolean
-  isExtracting?:   boolean
+  runId:            string
+  rules:            ExtractedRule[]
+  canExtract:       boolean
+  onExtract:        () => Promise<void>
+  onApprove?:       (ruleId: string) => Promise<void>
+  onUnapprove?:     (ruleId: string) => Promise<void>
+  onReject?:        (ruleId: string) => Promise<void>
+  onAddManual?:     () => void
+  /** Open edit dialog prefilled with the given manual rule. */
+  onEditManual?:    (rule: ExtractedRule) => void
+  /** Delete the given manual rule (shows inline confirmation). */
+  onDeleteManual?:  (ruleId: string) => Promise<void>
+  isLoading?:       boolean
+  isExtracting?:    boolean
 }
 
 // ── Derived rule grouping ────────────────────────────────────
@@ -226,6 +232,8 @@ export function RuleExtractionStatusCard({
   onUnapprove,
   onReject,
   onAddManual,
+  onEditManual,
+  onDeleteManual,
   isLoading,
   isExtracting,
 }: RuleExtractionStatusCardProps) {
@@ -478,6 +486,8 @@ export function RuleExtractionStatusCard({
                       // Unapprove available for approved extracted rules (not manual).
                       // Manual rules are always authoritative and cannot be unapproved.
                       onUnapprove={onUnapprove && rule.sourceKind !== 'manual' ? handleUnapprove : undefined}
+                      onEditManual={onEditManual}
+                      onDeleteManual={onDeleteManual}
                     />
                   ))}
                 </div>
@@ -520,6 +530,8 @@ export function RuleExtractionStatusCard({
                         pendingId={pendingId}
                         onApprove={onApprove ? handleApprove : undefined}
                         onReject={onReject ? handleReject : undefined}
+                        onEditManual={onEditManual}
+                        onDeleteManual={onDeleteManual}
                       />
                     ))
                   ) : (
@@ -532,6 +544,8 @@ export function RuleExtractionStatusCard({
                           isPending={pendingId === rule.id}
                           onApprove={onApprove ? handleApprove : undefined}
                           onReject={onReject ? handleReject : undefined}
+                          onEditManual={onEditManual}
+                          onDeleteManual={onDeleteManual}
                         />
                       ))}
                     </div>
@@ -558,6 +572,8 @@ export function RuleExtractionStatusCard({
                           isPending={pendingId === rule.id}
                           onApprove={onApprove ? handleApprove : undefined}
                           onReject={onReject ? handleReject : undefined}
+                          onEditManual={onEditManual}
+                          onDeleteManual={onDeleteManual}
                         />
                       ))}
                     </div>
@@ -609,16 +625,18 @@ export function RuleExtractionStatusCard({
 // ── Metric section (standalone rules under a metric header) ──
 
 interface MetricSectionProps {
-  metricKey: MetricKey
-  rules:     ExtractedRule[]
-  pendingId: string | null
-  onApprove?: (id: string) => void
-  onReject?:  (id: string) => void
+  metricKey:       MetricKey
+  rules:           ExtractedRule[]
+  pendingId:       string | null
+  onApprove?:      (id: string) => void
+  onReject?:       (id: string) => void
+  onEditManual?:   (rule: ExtractedRule) => void
+  onDeleteManual?: (id: string) => Promise<void>
 }
 
 const SECTION_PAGE_SIZE = 5
 
-function MetricSection({ metricKey, rules, pendingId, onApprove, onReject }: MetricSectionProps) {
+function MetricSection({ metricKey, rules, pendingId, onApprove, onReject, onEditManual, onDeleteManual }: MetricSectionProps) {
   const [expanded, setExpanded] = useState(false)
   const label   = METRIC_LABEL[metricKey] ?? metricKey
   const visible = expanded ? rules : rules.slice(0, SECTION_PAGE_SIZE)
@@ -637,6 +655,8 @@ function MetricSection({ metricKey, rules, pendingId, onApprove, onReject }: Met
             isPending={pendingId === rule.id}
             onApprove={onApprove}
             onReject={onReject}
+            onEditManual={onEditManual}
+            onDeleteManual={onDeleteManual}
           />
         ))}
       </div>
@@ -713,11 +733,13 @@ function ConflictGroupBlock({ group, pendingId, onApprove, onReject }: ConflictG
 // ── Rule row ─────────────────────────────────────────────────
 
 interface RuleRowProps {
-  rule:            ExtractedRule
-  isPending:       boolean
-  onApprove?:      (id: string) => void
-  onUnapprove?:    (id: string) => void
-  onReject?:       (id: string) => void
+  rule:             ExtractedRule
+  isPending:        boolean
+  onApprove?:       (id: string) => void
+  onUnapprove?:     (id: string) => void
+  onReject?:        (id: string) => void
+  onEditManual?:    (rule: ExtractedRule) => void
+  onDeleteManual?:  (id: string) => Promise<void>
   inConflictGroup?: boolean
 }
 
@@ -733,8 +755,10 @@ function formatValue(rule: ExtractedRule): string {
   return ''
 }
 
-function RuleRow({ rule, isPending, onApprove, onUnapprove, onReject, inConflictGroup }: RuleRowProps) {
+function RuleRow({ rule, isPending, onApprove, onUnapprove, onReject, onEditManual, onDeleteManual, inConflictGroup }: RuleRowProps) {
   const [detailOpen, setDetailOpen] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const isAuthoritative = AUTHORITATIVE_RULE_STATUSES.has(rule.status)
   const isRejected   = rule.status === 'rejected'
   const isSuperseded = rule.status === 'superseded'
@@ -833,6 +857,57 @@ function RuleRow({ rule, isPending, onApprove, onUnapprove, onReject, inConflict
                 {isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
                 Unapprove
               </button>
+            </div>
+          )}
+
+          {/* Edit / Delete — only for manual rules */}
+          {rule.sourceKind === 'manual' && (
+            <div className="flex gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+              {onEditManual && !confirmingDelete && (
+                <button
+                  onClick={() => onEditManual(rule)}
+                  disabled={deleting}
+                  title="Edit manual rule"
+                  className="flex h-6 w-6 items-center justify-center rounded border border-archai-graphite/60 bg-archai-graphite/30 text-muted-foreground hover:bg-archai-graphite/60 hover:text-white disabled:opacity-40 transition-colors"
+                >
+                  <Pencil className="h-3 w-3" />
+                </button>
+              )}
+              {onDeleteManual && !confirmingDelete && (
+                <button
+                  onClick={() => setConfirmingDelete(true)}
+                  disabled={deleting}
+                  title="Delete manual rule"
+                  className="flex h-6 w-6 items-center justify-center rounded border border-red-400/30 bg-red-400/10 text-red-400 hover:bg-red-400/20 disabled:opacity-40 transition-colors"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              )}
+              {confirmingDelete && (
+                <>
+                  <span className="text-[10px] text-red-400 flex items-center pr-0.5">Delete?</span>
+                  <button
+                    onClick={async () => {
+                      setDeleting(true)
+                      await onDeleteManual?.(rule.id)
+                      setDeleting(false)
+                      setConfirmingDelete(false)
+                    }}
+                    disabled={deleting}
+                    className="flex h-6 items-center gap-0.5 rounded border border-red-400/40 bg-red-400/20 px-1.5 text-[10px] text-red-400 hover:bg-red-400/30 disabled:opacity-40 transition-colors"
+                  >
+                    {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmingDelete(false)}
+                    disabled={deleting}
+                    className="flex h-6 items-center rounded border border-archai-graphite/60 bg-archai-graphite/30 px-1.5 text-[10px] text-muted-foreground hover:bg-archai-graphite/60 disabled:opacity-40 transition-colors"
+                  >
+                    No
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>

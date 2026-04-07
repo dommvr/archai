@@ -2,114 +2,119 @@
  * /api/site-context/parcel-report
  *
  * Fetches the official GUGiK parcel report PDF server-side and streams it
- * back to the browser. Two endpoints are tried in order with fallback:
+ * back to the browser.
  *
- *   1. ULDK PDF report: https://uldk.gugik.gov.pl/pdfReport?numer={region}.{parcelId}
- *      This is a public endpoint that requires no authentication.
+ * The caller must supply the full TERYT cadastral identifier as returned by
+ * ULDK's `teryt` result field (e.g. "0226021.0001.24/35"). This is the only
+ * identifier format accepted by the GUGIK PDF report endpoint. Do NOT attempt
+ * to construct it from `region` + `parcelId` — those fields alone do not
+ * contain the gmina TERYT code needed to form a valid identifier.
  *
- *   2. Geoportal SLN report: https://mapy.geoportal.gov.pl/wss/service/SLN/guest/sln/dzialka/raport?numer={teryt}
- *      Requires a valid full TERYT identifier. Tried as fallback if ULDK PDF fails.
+ * Endpoint tried:
+ *   https://uldk.gugik.gov.pl/pdfReport?numer={teryt}
  *
  * Query params:
- *   parcelId  — parcel number returned by ULDK (e.g. "33")
- *   region    — obręb code from ULDK (e.g. "0001_5.0003")
+ *   teryt  — full TERYT cadastral parcel identifier from ULDK (required)
+ *
+ * Error response shape:
+ *   { error: string, reason: 'invalid_params'|'not_found'|'forbidden'|'non_pdf'|'upstream_error'|'gateway_error' }
  *
  * // COUNTRY: Poland
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 
-// Allowed report hostnames — never proxy arbitrary URLs
-const ALLOWED_HOSTS = [
-  'uldk.gugik.gov.pl',
-  'mapy.geoportal.gov.pl',
-]
+// Only allow the GUGIK/ULDK report host — never proxy arbitrary URLs
+const REPORT_HOST = 'uldk.gugik.gov.pl'
 
 function isTrustedReportUrl(url: string): boolean {
   try {
-    const parsed = new URL(url)
-    return ALLOWED_HOSTS.some((h) => parsed.hostname === h)
+    return new URL(url).hostname === REPORT_HOST
   } catch {
     return false
   }
 }
 
-async function tryFetchPdf(url: string): Promise<Response | null> {
-  if (!isTrustedReportUrl(url)) return null
-  try {
-    const res = await fetch(url, {
-      headers: { Accept: 'application/pdf, */*' },
-      signal: AbortSignal.timeout(20_000),
-    })
-    if (!res.ok) {
-      console.warn(`[parcel-report] ${url} returned ${res.status}`)
-      return null
-    }
-    const ct = res.headers.get('content-type') ?? ''
-    if (!ct.includes('pdf') && !ct.includes('octet-stream')) {
-      // Not a PDF — endpoint returned HTML/JSON error
-      const preview = await res.text()
-      console.warn(`[parcel-report] ${url} returned non-PDF content-type: ${ct}, body: ${preview.substring(0, 200)}`)
-      return null
-    }
-    return res
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'unknown'
-    console.warn(`[parcel-report] ${url} fetch error: ${msg}`)
-    return null
-  }
+// Structured error helper
+function reportError(
+  reason: 'invalid_params' | 'not_found' | 'forbidden' | 'non_pdf' | 'upstream_error' | 'gateway_error',
+  detail: string,
+  status: number,
+): NextResponse {
+  return NextResponse.json({ error: detail, reason }, { status })
 }
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
-  const parcelId = searchParams.get('parcelId')
-  const region   = searchParams.get('region')
+  const teryt = searchParams.get('teryt')
 
-  if (!parcelId || !region) {
-    return NextResponse.json({ error: 'parcelId and region are required' }, { status: 400 })
+  if (!teryt || !teryt.trim()) {
+    return reportError('invalid_params', 'teryt is required', 400)
   }
 
-  // ── Attempt 1: ULDK PDF report endpoint ─────────────────────────────────────
-  // Format: {region}.{parcelId}   e.g. "0001_5.0003.33"
-  // ULDK strips internal dots in region code — the numer param is region.parcelId
+  // Basic sanity check — real ULDK TERYT identifiers contain digits, dots, slashes,
+  // hyphens, underscores, and uppercase letters (e.g. "146510_8.0309.24/35").
+  // Reject anything that could be path traversal or injection.
   // // COUNTRY: Poland
-  const uldkNumer = `${region}.${parcelId}`
-  const uldkUrl = `https://uldk.gugik.gov.pl/pdfReport?numer=${encodeURIComponent(uldkNumer)}`
-
-  console.log('[parcel-report] attempt 1 — ULDK pdfReport:', uldkUrl)
-  let pdfRes = await tryFetchPdf(uldkUrl)
-
-  if (pdfRes) {
-    console.log('[parcel-report] success via ULDK pdfReport')
-  } else {
-    // ── Attempt 2: Geoportal SLN raport endpoint ──────────────────────────────
-    // Requires full TERYT identifier — same numer format works here too
-    // // COUNTRY: Poland
-    const slnUrl = `https://mapy.geoportal.gov.pl/wss/service/SLN/guest/sln/dzialka/raport?numer=${encodeURIComponent(uldkNumer)}`
-    console.log('[parcel-report] attempt 2 — Geoportal SLN raport:', slnUrl)
-    pdfRes = await tryFetchPdf(slnUrl)
-
-    if (pdfRes) {
-      console.log('[parcel-report] success via Geoportal SLN raport')
-    }
+  if (!/^[\w.\-/]+$/.test(teryt)) {
+    return reportError('invalid_params', 'teryt contains invalid characters', 400)
   }
 
-  if (!pdfRes) {
-    console.error('[parcel-report] both endpoints failed for parcel:', uldkNumer)
-    return NextResponse.json(
-      { error: 'Parcel report unavailable', numer: uldkNumer },
-      { status: 502 }
-    )
+  // ULDK pdfReport endpoint — accepts full TERYT cadastral identifier
+  // Format: {gmina_teryt7}.{obreb4}.{parcel_number}  e.g. "0226021.0001.24/35"
+  // // COUNTRY: Poland
+  const reportUrl = `https://uldk.gugik.gov.pl/dzinfo.php?dzialka=${encodeURIComponent(teryt)}&print=`
+
+  if (!isTrustedReportUrl(reportUrl)) {
+    // Should never happen given the constant above, but belt-and-suspenders
+    return reportError('gateway_error', 'Computed URL is not on the allowed host', 500)
   }
 
-  const body = await pdfRes.arrayBuffer()
-  const safeParcelId = parcelId.replace(/[^a-zA-Z0-9_\-]/g, '_')
+  console.log('[parcel-report] teryt:', teryt)
+  console.log('[parcel-report] fetching:', reportUrl)
+
+  let res: Response
+  try {
+    res = await fetch(reportUrl, {
+      headers: { Accept: 'application/pdf, */*' },
+      signal: AbortSignal.timeout(20_000),
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown'
+    console.error('[parcel-report] network error:', msg)
+    return reportError('gateway_error', `Network error: ${msg}`, 502)
+  }
+
+  console.log(`[parcel-report] upstream status: ${res.status}, content-type: ${res.headers.get('content-type') ?? 'none'}`)
+
+  if (res.status === 404) {
+    return reportError('not_found', `Report not found for teryt: ${teryt}`, 404)
+  }
+  if (res.status === 401 || res.status === 403) {
+    return reportError('forbidden', `Upstream returned ${res.status}`, 502)
+  }
+  if (!res.ok) {
+    const body = await res.text()
+    console.error(`[parcel-report] upstream error ${res.status}:`, body.substring(0, 300))
+    return reportError('upstream_error', `Upstream returned ${res.status}`, 502)
+  }
+
+  const ct = res.headers.get('content-type') ?? ''
+  if (!ct.includes('pdf') && !ct.includes('octet-stream')) {
+    const preview = await res.text()
+    console.error(`[parcel-report] unexpected content-type: ${ct}, body: ${preview.substring(0, 300)}`)
+    return reportError('non_pdf', `Upstream returned unexpected content-type: ${ct}`, 502)
+  }
+
+  const body = await res.arrayBuffer()
+  const safeId = teryt.replace(/[^a-zA-Z0-9_\-.]/g, '_')
+  console.log('[parcel-report] success, streaming', body.byteLength, 'bytes')
 
   return new NextResponse(body, {
     status: 200,
     headers: {
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="parcel-report-${safeParcelId}.pdf"`,
+      'Content-Disposition': `attachment; filename="parcel-report-${safeId}.pdf"`,
       'Cache-Control': 'public, max-age=300',
     },
   })

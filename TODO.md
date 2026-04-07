@@ -5,6 +5,3 @@ uvicorn app.main:app --reload --port 8000
 
 
 -precheck-documents storage should be changed to just documents
-
-
--run summarization + report to download

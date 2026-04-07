@@ -98,11 +98,56 @@ class ComplianceEngineService:
         """
         all_rules = await self._repo.get_rules_for_run(run_id)
 
-        # Filter by applicability scope first
+        # Filter by applicability scope first.
+        #
+        # Design rule: an approved or manually created rule is ALWAYS included,
+        # regardless of the applicability constraints the LLM stored on it.
+        # Rationale: when a user clicks "Approve", they are explicitly confirming
+        # that the rule applies to this project. LLM-extracted applicability
+        # (zoning_districts, jurisdiction_code) is metadata about where the rule
+        # was found in the source document — it must NOT silently gate compliance
+        # for user-approved rules. This was the root cause of approved
+        # front/rear/side-setback and height rules not appearing in compliance:
+        # the LLM tagged them with a specific zoning district (e.g. "R6") that
+        # didn't match the site's district, causing silent exclusion.
+        #
+        # Applicability filtering still applies to DRAFT and AUTO_APPROVED rules
+        # (which haven't been user-reviewed) so that speculative draft rules do
+        # not pollute the compliance result for a different zone.
+        #
+        # Manual rules: always included (is_authoritative=True by creation, and
+        # they always have an empty Applicability so would pass anyway, but
+        # the explicit bypass makes the intent clear).
+        _USER_APPROVED_STATUSES = {
+            RuleStatus.APPROVED,
+            RuleStatus.REVIEWED,
+        }
         if site_context:
-            all_rules = [
-                r for r in all_rules if _is_applicable(r.applicability, site_context)
-            ]
+            kept: list[ExtractedRule] = []
+            for r in all_rules:
+                # User-approved and manual rules are never filtered by applicability.
+                is_user_approved = (
+                    r.source_kind == RuleSourceKind.MANUAL
+                    or r.status in _USER_APPROVED_STATUSES
+                )
+                if is_user_approved or _is_applicable(r.applicability, site_context):
+                    kept.append(r)
+                else:
+                    log.debug(
+                        "Draft/auto-approved rule excluded by applicability filter — "
+                        "run=%s rule_id=%s metric=%s status=%s "
+                        "rule.jurisdiction=%r rule.zoning_districts=%r "
+                        "site.jurisdiction=%r site.zoning_district=%r.",
+                        run_id,
+                        r.id,
+                        r.metric_key.value if r.metric_key else None,
+                        r.status.value if r.status else None,
+                        r.applicability.jurisdiction_code if r.applicability else None,
+                        r.applicability.zoning_districts if r.applicability else None,
+                        site_context.jurisdiction_code,
+                        site_context.zoning_district,
+                    )
+            all_rules = kept
 
         auto_apply = options.rule_auto_apply_enabled if options else False
 
@@ -209,6 +254,17 @@ class ComplianceEngineService:
             check = _evaluate_single_rule(run_id=run_id, rule=rule, metric_map=metric_map, now=now)
             checks_pre_persist.append(check)
             check_rows.append(_check_to_row(check))
+            # Per-rule trace — essential for diagnosing silent-skip bugs.
+            log.debug(
+                "Rule evaluated — run=%s rule_id=%s metric=%s status=%s "
+                "actual=%s expected=%s",
+                run_id,
+                rule.id,
+                check.metric_key.value if check.metric_key else None,
+                check.status.value,
+                check.actual_value,
+                check.expected_value,
+            )
 
         if not check_rows:
             summary = ComplianceRunSummary(
@@ -217,6 +273,16 @@ class ComplianceEngineService:
                 ambiguous=0, missing_input=0, not_evaluable=0,
             )
             return [], summary
+
+        # Invariant: every selected rule must have produced exactly one check row.
+        # A mismatch here means a rule was silently dropped somewhere in the loop —
+        # log the discrepancy loudly so it shows up in monitoring.
+        if len(check_rows) != len(rules):
+            log.error(
+                "evaluate_rules invariant broken — run=%s rules_in=%d checks_out=%d. "
+                "Some rules produced no compliance check. Investigate immediately.",
+                run_id, len(rules), len(check_rows),
+            )
 
         checks = await self._repo.create_checks_bulk(check_rows)
         summary = _build_run_summary(run_id, checks)
@@ -1303,7 +1369,14 @@ def _build_run_summary(run_id: UUID, checks: list[ComplianceCheck]) -> Complianc
     failed = sum(1 for c in checks if c.status == CheckResultStatus.FAIL)
     ambiguous = sum(1 for c in checks if c.status == CheckResultStatus.AMBIGUOUS)
     missing = sum(1 for c in checks if c.status == CheckResultStatus.MISSING_INPUT)
-    not_evaluable = sum(1 for c in checks if c.status == CheckResultStatus.NOT_APPLICABLE)
+    # not_evaluable counts both NOT_APPLICABLE (explicit scope exclusion) and
+    # MISSING_INPUT (metric not yet available) so the summary total equals len(checks).
+    # Previously only NOT_APPLICABLE was counted here, which caused not_evaluable=0
+    # even when many checks were MISSING_INPUT because a model hadn't been synced yet.
+    not_evaluable = sum(
+        1 for c in checks
+        if c.status in {CheckResultStatus.NOT_APPLICABLE, CheckResultStatus.MISSING_INPUT}
+    )
     return ComplianceRunSummary(
         run_id=run_id,
         total=len(checks),

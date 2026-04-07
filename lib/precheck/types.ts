@@ -4,7 +4,10 @@ import {
   ApproveRuleInputSchema,
   AssignModelRefInputSchema,
   AssignSiteContextInputSchema,
+  ChecklistSummarySectionSchema,
   ComputeRunMetricsInputSchema,
+  ComplianceResultRowSchema,
+  ComplianceSummarySectionSchema,
   CreateProjectSiteContextInputSchema,
   DeleteProjectSiteContextInputSchema,
   ComplianceCheckSchema,
@@ -21,6 +24,7 @@ import {
   GetRunDetailsResponseSchema,
   IngestDocumentsInputSchema,
   IngestSiteInputSchema,
+  IssueSummarySectionSchema,
   PermitChecklistItemSchema,
   PrecheckRunSchema,
   PrecheckRunSummaryResponseSchema,
@@ -37,6 +41,7 @@ import {
   RegisterDocumentInputSchema,
   RegisterProjectDocumentInputSchema,
   RejectRuleInputSchema,
+  RunReportDataSchema,
   SetActiveProjectModelInputSchema,
   SetDefaultSiteContextInputSchema,
   SetProjectExtractionOptionsInputSchema,
@@ -45,7 +50,11 @@ import {
   SyncProjectModelInputSchema,
   SyncSpeckleModelInputSchema,
   UpdateManualRuleInputSchema,
+  DeleteManualRuleInputSchema,
   UploadedDocumentSchema,
+  SuggestedZoningDocumentSchema,
+  SuggestedDocsResponseSchema,
+  DOC_CLASSIFICATIONS,
 } from "./schemas"
 
 export type SiteContext = z.infer<typeof SiteContextSchema>
@@ -92,6 +101,18 @@ export type ComputeRunMetricsInput = z.infer<typeof ComputeRunMetricsInputSchema
 export type RejectRuleInput = z.infer<typeof RejectRuleInputSchema>
 export type CreateManualRuleInput = z.infer<typeof CreateManualRuleInputSchema>
 export type UpdateManualRuleInput = z.infer<typeof UpdateManualRuleInputSchema>
+export type DeleteManualRuleInput = z.infer<typeof DeleteManualRuleInputSchema>
 export type ReadinessReason = z.infer<typeof ReadinessReasonSchema>
 export type ReadinessBreakdown = z.infer<typeof ReadinessBreakdownSchema>
 export type PrecheckRunSummaryResponse = z.infer<typeof PrecheckRunSummaryResponseSchema>
+export type ComplianceResultRow = z.infer<typeof ComplianceResultRowSchema>
+export type ComplianceSummarySection = z.infer<typeof ComplianceSummarySectionSchema>
+export type IssueSummarySection = z.infer<typeof IssueSummarySectionSchema>
+export type ChecklistSummarySection = z.infer<typeof ChecklistSummarySectionSchema>
+export type RunReportData = z.infer<typeof RunReportDataSchema>
+
+// Suggested zoning documents — online discovery for Polish official planning PDFs
+// // COUNTRY: Poland
+export type DocClassification = (typeof DOC_CLASSIFICATIONS)[number]
+export type SuggestedZoningDocument = z.infer<typeof SuggestedZoningDocumentSchema>
+export type SuggestedDocsResponse = z.infer<typeof SuggestedDocsResponseSchema>

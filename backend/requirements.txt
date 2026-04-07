@@ -34,6 +34,9 @@ pytest-asyncio>=0.24.0
 # ── Speckle ───────────────────────────────────────────────────
 specklepy>=2.23.0               # Speckle Python SDK — object fetch via ServerTransport
 
+# ── Report generation ─────────────────────────────────────────
+reportlab>=4.2.0                # PDF report generation (server-side, no browser needed)
+
 # ── Future integrations (comment in when ready) ───────────────
 openai>=1.83.0                  # LLM rule extraction + embeddings (Responses API requires >=1.83.0)
 # langchain>=0.3.0              # LangGraph agent orchestration

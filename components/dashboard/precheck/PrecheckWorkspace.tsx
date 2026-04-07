@@ -33,10 +33,11 @@ import { ReadinessScoreCard } from './ReadinessScoreCard'
 import { ComplianceIssuesTable } from './ComplianceIssuesTable'
 import { ComplianceIssueDrawer } from './ComplianceIssueDrawer'
 import { PermitChecklistCard } from './PermitChecklistCard'
+import { ComplianceSummaryTab } from './ComplianceSummaryTab'
 import { PrecheckViewerPanel } from './PrecheckViewerPanel'
 import { ResizableVerticalSplit } from '@/components/ui/resizable-vertical-split'
 import { ResizableHorizontalSplit } from '@/components/ui/resizable-horizontal-split'
-import type { CreateManualRuleInput } from '@/lib/precheck/types'
+import type { CreateManualRuleInput, UpdateManualRuleInput } from '@/lib/precheck/types'
 import type { ParcelSelection } from './SiteContextMapModal'
 
 // Dynamically import the map modal — heavy Mapbox bundle, never SSR'd
@@ -45,7 +46,7 @@ const SiteContextMapModal = dynamic(
   { ssr: false }
 )
 
-type Tab = 'setup' | 'issues' | 'checklist'
+type Tab = 'setup' | 'issues' | 'checklist' | 'summary'
 
 interface PrecheckWorkspaceProps {
   user: AuthUser
@@ -77,6 +78,7 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
   const [syncingModel, setSyncingModel] = useState(false)
   const [computingRunMetrics, setComputingRunMetrics] = useState(false)
   const [manualRuleOpen, setManualRuleOpen] = useState(false)
+  const [editingRule, setEditingRule] = useState<ExtractedRule | null>(null)
   // Tracks docs selected in the project library but not yet ingested.
   // Used so hasDocuments is true as soon as the user picks docs, not only after ingestion.
   const [selectedDocCount, setSelectedDocCount] = useState(0)
@@ -437,7 +439,7 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
     await precheckApi.evaluateCompliance({ runId: selectedRunId })
     // LANGGRAPH AGENT ENTRYPOINT PLACEHOLDER
     await refreshRunState(selectedRunId)
-    setActiveTab('issues')
+    setActiveTab('summary')
   }
 
   async function handleDeleteDocument(documentId: string) {
@@ -496,6 +498,27 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
     return rule
   }
 
+  function handleEditManualRule(rule: ExtractedRule) {
+    setEditingRule(rule)
+    setManualRuleOpen(true)
+  }
+
+  async function handleUpdateManualRule(input: UpdateManualRuleInput) {
+    const rule = await precheckApi.updateManualRule(input)
+    if (selectedRunId) {
+      await fetchRunDetails(selectedRunId)
+    }
+    setEditingRule(null)
+    return rule
+  }
+
+  async function handleDeleteManualRule(ruleId: string) {
+    await precheckApi.deleteManualRule({ ruleId })
+    if (selectedRunId) {
+      await fetchRunDetails(selectedRunId)
+    }
+  }
+
   function handleSelectIssue(issue: ComplianceIssue) {
     setSelectedIssue(issue)
     setDrawerOpen(true)
@@ -522,6 +545,7 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'setup', label: 'Setup' },
+    { id: 'summary', label: 'Summary' },
     { id: 'issues', label: 'Issues', count: issues.length || undefined },
     { id: 'checklist', label: 'Checklist', count: checklist.length || undefined },
   ]
@@ -705,7 +729,9 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
                               onApprove={handleApproveRule}
                               onUnapprove={handleUnapproveRule}
                               onReject={handleRejectRule}
-                              onAddManual={() => setManualRuleOpen(true)}
+                              onAddManual={() => { setEditingRule(null); setManualRuleOpen(true) }}
+                              onEditManual={handleEditManualRule}
+                              onDeleteManual={handleDeleteManualRule}
                               isExtracting={extracting}
                             />
                             <SpeckleModelPicker
@@ -779,6 +805,17 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
                       </>
                     )}
 
+                    {activeTab === 'summary' && (
+                      <ComplianceSummaryTab
+                        runId={selectedRunId}
+                        runName={run?.name}
+                        isStale={run?.isStale}
+                        hasCompletedRun={
+                          run?.status === 'completed' || run?.status === 'generating_report'
+                        }
+                      />
+                    )}
+
                     {activeTab === 'issues' && (
                       <ComplianceIssuesTable
                         issues={issues}
@@ -841,10 +878,12 @@ export function PrecheckWorkspace({ user, projectId, projectActiveModelRef, proj
       {projectId && (
         <ManualRuleDialog
           open={manualRuleOpen}
-          onClose={() => setManualRuleOpen(false)}
+          onClose={() => { setManualRuleOpen(false); setEditingRule(null) }}
           projectId={projectId}
           runId={selectedRunId ?? undefined}
+          editRule={editingRule ?? undefined}
           onCreate={handleCreateManualRule}
+          onUpdate={handleUpdateManualRule}
         />
       )}
 

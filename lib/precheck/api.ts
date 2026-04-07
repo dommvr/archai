@@ -27,12 +27,14 @@ import type {
   RegisterDocumentInput,
   RegisterProjectDocumentInput,
   RejectRuleInput,
+  RunReportData,
   SetActiveProjectModelInput,
   SetDefaultSiteContextInput,
   SetProjectExtractionOptionsInput,
   SyncProjectModelInput,
   SyncSpeckleModelInput,
   UpdateManualRuleInput,
+  DeleteManualRuleInput,
   UploadedDocument,
 } from "./types"
 import {
@@ -48,6 +50,7 @@ import {
   ProjectModelRefsResponseSchema,
   ProjectRunsResponseSchema,
   ProjectSiteContextsResponseSchema,
+  RunReportDataSchema,
   SiteContextSchema,
   SpeckleModelRefSchema,
   UploadedDocumentSchema,
@@ -413,6 +416,14 @@ export async function updateManualRule(input: UpdateManualRuleInput): Promise<Ex
   return ExtractedRuleSchema.parse(data)
 }
 
+/** Hard-delete a manual rule (source_kind='manual' only). Returns 204 No Content. */
+export async function deleteManualRule(input: DeleteManualRuleInput): Promise<void> {
+  await request<void>("/api/agents/precheck", {
+    method: "POST",
+    body: JSON.stringify({ action: "delete_manual_rule", payload: input }),
+  })
+}
+
 /**
  * Get the latest project-level geometry snapshot for a model ref.
  * Returns null if metrics haven't been derived yet (background task still running).
@@ -446,4 +457,61 @@ export async function setProjectExtractionOptions(
     body: JSON.stringify({ action: "set_extraction_options", payload: input }),
   })
   return ProjectExtractionOptionsSchema.parse(data)
+}
+
+// ── Report data ──────────────────────────────────────────────────────────────
+
+/**
+ * Fetch the full structured report payload for a run.
+ * Used by ComplianceSummaryTab (on-screen) and the PDF download flow.
+ * Both views derive from this same payload, so they can never diverge.
+ */
+export async function getRunReportData(
+  runId: string,
+  init?: Pick<RequestInit, "signal">
+): Promise<RunReportData> {
+  const data = await request<RunReportData>(
+    `/api/agents/precheck?runId=${runId}&scope=report_data`,
+    init,
+  )
+  return RunReportDataSchema.parse(data)
+}
+
+/**
+ * Trigger a PDF download for a run's compliance report.
+ * Fetches the binary PDF from the backend via the Next.js proxy and
+ * triggers a browser download using a temporary object URL.
+ *
+ * The run name (or a fallback) is used as the suggested filename.
+ * If the run is stale, the PDF is still downloaded but contains a
+ * prominent stale warning — no blocking, just transparency.
+ */
+export async function downloadRunReportPdf(
+  runId: string,
+  suggestedFilename?: string
+): Promise<void> {
+  const response = await fetch(
+    `/api/agents/precheck?runId=${runId}&scope=report_pdf`,
+    { cache: "no-store" }
+  )
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(text || `Failed to generate report: ${response.status}`)
+  }
+
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  // Filename format: "{run_name} - summary.pdf"
+  // Sanitise: keep alphanumeric, spaces, hyphens, underscores, dots.
+  const safeName = suggestedFilename
+    ? suggestedFilename.replace(/[^a-z0-9_\-. ]/gi, "_").trim() || "run"
+    : "run"
+  a.download = `${safeName} - summary.pdf`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }

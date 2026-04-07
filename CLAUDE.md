@@ -48,15 +48,15 @@ ArchAI is a **viewer-centric, interoperable** design platform. It is NOT a Revit
 
 | # | Tool | Purpose |
 |---|------|---------|
-| 1 | Site Analysis & Zoning Checker | Parse zoning codes, flag violations, pre-check permit conditions |
-| 2 | Massing Generator | AI feasibility massing from a brief and site constraints |
-| 3 | Space Planner / Test-Fit | Generate space layouts from program requirements |
-| 4 | Live Metrics Dashboard | GFA, efficiency, carbon, code risk — live as model changes |
-| 5 | Option Comparison Board | Side-by-side comparison of design alternatives |
-| 6 | Sustainability Copilot | Real-time embodied carbon, Ladybug solar/wind analysis |
-| 7 | Firm Knowledge Assistant | RAG over firm documents, specs, past projects |
-| 8 | Brief-to-Program Translator | Parse client brief into structured architectural program |
-| 9 | Spec Writer + Sketch-to-BIM | Generate specs and translate rough sketches to BIM elements |
+| 1 | Smart Zoning & Code Checker + Permit Pre-Check | Check zoning, setbacks, FAR, parking, code constraints, and permit readiness |
+| 2 | Instant Feasibility & Massing Generator | Generate and rank early massing options from site, zoning, and program targets |
+| 3 | Continuous Model Intelligence Dashboard | Track synced model metrics, version history, deltas, trends, and KPI alerts |
+| 4 | Design Option Comparison Board | Compare saved design options side by side across geometry, metrics, and compliance |
+| 5 | AI Brief-to-Program Translator | Turn briefs, transcripts, and RFPs into structured spatial programs |
+| 6 | Advanced Space Planning / Test-Fit Generator | Generate layout options from program and adjacency requirements |
+| 7 | Sustainability Copilot | Monitor embodied carbon and design-performance proxies in real time |
+| 8 | Firm Knowledge Assistant | Query firm docs, specs, past projects, and model data with RAG agents |
+| 9 | AI Spec Writer + Text-to-BIM Sketch Module | Draft specs and convert rough sketches into simple BIM-ready geometry |
 
 ---
 

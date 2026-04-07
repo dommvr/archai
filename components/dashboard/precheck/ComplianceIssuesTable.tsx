@@ -120,17 +120,17 @@ export function ComplianceIssuesTable({ issues, onSelectIssue, isLoading }: Comp
                   'hover:border-archai-orange/30 hover:bg-archai-orange/5 transition-colors group',
                 )}
               >
-                <div className="flex items-center gap-2">
-                  <Icon className={cn('h-3.5 w-3.5 shrink-0', cfg.color.split(' ')[0])} />
-                  <span className="flex-1 text-xs text-white font-medium truncate group-hover:text-archai-amber transition-colors">
+                <div className="flex items-start gap-2">
+                  <Icon className={cn('h-3.5 w-3.5 shrink-0 mt-0.5', cfg.color.split(' ')[0])} />
+                  <span className="flex-1 min-w-0 text-xs text-white font-medium leading-snug break-words group-hover:text-archai-amber transition-colors">
                     {issue.title}
                   </span>
-                  <span className={cn('text-[10px] font-medium rounded-full px-1.5 py-0.5 border shrink-0', cfg.color)}>
+                  <span className={cn('text-[10px] font-medium rounded-full px-1.5 py-0.5 border shrink-0 whitespace-nowrap', cfg.color)}>
                     {cfg.label}
                   </span>
                 </div>
                 {issue.summary && (
-                  <p className="text-[11px] text-muted-foreground mt-0.5 truncate pl-5">{issue.summary}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 pl-5 leading-snug break-words line-clamp-3">{issue.summary}</p>
                 )}
               </button>
             )

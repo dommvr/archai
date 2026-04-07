@@ -587,3 +587,131 @@ export const UpdateManualRuleInputSchema = z.object({
   versionLabel: z.string().nullable().optional(),
   extractionNotes: z.string().nullable().optional(),
 })
+
+/**
+ * Input for deleting a manual rule (source_kind='manual' only).
+ */
+export const DeleteManualRuleInputSchema = z.object({
+  ruleId: z.string().uuid(),
+})
+
+// ── Report data schemas ──────────────────────────────────────────────────────
+// These mirror the RunReportData family in backend/app/core/schemas.py.
+// Both the on-screen ComplianceSummaryTab and the PDF endpoint use the same
+// RunReportDataSchema — they can never drift apart.
+
+/**
+ * A single evaluated rule's result, joining ComplianceCheck + ExtractedRule.
+ * Mirrors ComplianceResultRow in backend/app/core/schemas.py.
+ */
+export const ComplianceResultRowSchema = z.object({
+  checkId: z.string().uuid(),
+  ruleId: z.string().uuid(),
+  ruleCode: z.string().nullable().optional(),
+  ruleTitle: z.string().nullable().optional(),
+  metricKey: z.enum(METRIC_KEYS).nullable().optional(),
+  metricLabel: z.string().nullable().optional(),
+  status: z.enum(CHECK_RESULT_STATUSES),
+  actualValue: z.number().nullable().optional(),
+  expectedValue: z.number().nullable().optional(),
+  expectedMin: z.number().nullable().optional(),
+  expectedMax: z.number().nullable().optional(),
+  units: z.string().nullable().optional(),
+  explanation: z.string().nullable().optional(),
+  sourceKind: z.enum(RULE_SOURCE_KINDS).nullable().optional(),
+  citationSection: z.string().nullable().optional(),
+  citationPage: z.number().int().nullable().optional(),
+  // Provenance fields (used in PDF appendix; available but not always rendered on-screen)
+  description: z.string().nullable().optional(),
+  conditionText: z.string().nullable().optional(),
+  exceptionText: z.string().nullable().optional(),
+  normalizationNote: z.string().nullable().optional(),
+  citationSnippet: z.string().nullable().optional(),
+})
+
+export const ComplianceSummarySectionSchema = z.object({
+  total: z.number().int().nonnegative(),
+  passed: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  warning: z.number().int().nonnegative(),
+  notEvaluable: z.number().int().nonnegative(),
+})
+
+export const IssueSummarySectionSchema = z.object({
+  total: z.number().int().nonnegative(),
+  critical: z.number().int().nonnegative(),
+  error: z.number().int().nonnegative(),
+  warning: z.number().int().nonnegative(),
+  info: z.number().int().nonnegative(),
+})
+
+export const ChecklistSummarySectionSchema = z.object({
+  total: z.number().int().nonnegative(),
+  resolved: z.number().int().nonnegative(),
+  unresolved: z.number().int().nonnegative(),
+})
+
+/**
+ * Full structured report payload.
+ * Returned by GET /api/agents/precheck?runId=&scope=report_data.
+ * Mirrors RunReportData in backend/app/core/schemas.py.
+ */
+export const RunReportDataSchema = z.object({
+  runId: z.string().uuid(),
+  runName: z.string().nullable().optional(),
+  runStatus: z.enum(PRECHECK_RUN_STATUSES),
+  runCreatedAt: z.string(),
+  isStale: z.boolean().default(false),
+  rulesChangedAt: z.string().nullable().optional(),
+  // Site / jurisdiction
+  address: z.string().nullable().optional(),
+  municipality: z.string().nullable().optional(),
+  jurisdictionCode: z.string().nullable().optional(),
+  zoningDistrict: z.string().nullable().optional(),
+  // Model reference
+  modelName: z.string().nullable().optional(),
+  modelStreamId: z.string().nullable().optional(),
+  modelSyncedAt: z.string().nullable().optional(),
+  // Sections
+  readiness: ReadinessBreakdownSchema,
+  complianceSummary: ComplianceSummarySectionSchema,
+  complianceResults: z.array(ComplianceResultRowSchema).default([]),
+  issueSummary: IssueSummarySectionSchema,
+  topIssues: z.array(ComplianceIssueSchema).default([]),
+  checklistSummary: ChecklistSummarySectionSchema,
+  checklistItems: z.array(PermitChecklistItemSchema).default([]),
+  authoritativeRuleCount: z.number().int().nonnegative(),
+})
+
+// ── Suggested zoning documents (online discovery) ────────────────────────────
+// Returned by GET /api/site-context/suggested-docs
+// These are suggestions only — the system makes no legal conclusions.
+// // COUNTRY: Poland
+
+// Only the classifications that can appear in the API response payload.
+// NOTICE, PROCEDURAL_GUIDE, and UNKNOWN are internal-only — they are filtered
+// out before any document is returned. Do NOT add them here.
+export const DOC_CLASSIFICATIONS = [
+  'ADOPTED_PLAN_TEXT',
+  'PLAN_DRAWING_ANNEX',
+  'PLAN_GENERAL_TEXT',
+  'OFFICIAL_JOURNAL_COPY',
+  'JUSTIFICATION',
+  'ENVIRONMENTAL_FORECAST',
+] as const
+
+export const SuggestedZoningDocumentSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  classification: z.enum(DOC_CLASSIFICATIONS),
+  sourceAuthority: z.string().optional(),
+  sourceDomain: z.string(),
+  sourcePageUrl: z.string().optional(),
+  pdfUrl: z.string(),
+  confidence: z.number().min(0).max(100),
+  reasons: z.array(z.string()).default([]),
+})
+
+export const SuggestedDocsResponseSchema = z.object({
+  docs: z.array(SuggestedZoningDocumentSchema),
+})

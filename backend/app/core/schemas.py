@@ -802,3 +802,128 @@ class UpdateManualRuleRequest(BaseSchema):
     citation_section: str | None = None
     citation_page: int | None = Field(default=None, ge=0)
     applicability: Applicability | None = None
+
+
+# ════════════════════════════════════════════════════════════
+# REPORT DATA SCHEMAS
+# Used by GET /precheck/runs/{id}/report-data and the PDF endpoint.
+# These are the single source of truth for both the on-screen
+# compliance summary view and the downloaded PDF report.
+# ════════════════════════════════════════════════════════════
+
+class ComplianceResultRow(BaseSchema):
+    """
+    A single evaluated rule's result as shown in the compliance summary table
+    and the PDF report.
+
+    Joins ComplianceCheck + ExtractedRule for display.  All fields nullable
+    so that missing rule metadata (e.g. source citation) degrades gracefully
+    without crashing the report.
+    """
+    check_id: UUID
+    rule_id: UUID
+    rule_code: str | None = None
+    rule_title: str | None = None
+    metric_key: MetricKey | None = None
+    metric_label: str | None = None        # human-readable, e.g. "Building height"
+    status: CheckResultStatus
+    actual_value: float | None = None
+    expected_value: float | None = None
+    expected_min: float | None = None
+    expected_max: float | None = None
+    units: str | None = None
+    explanation: str | None = None
+    source_kind: RuleSourceKind | None = None   # extracted | manual
+    citation_section: str | None = None
+    citation_page: int | None = None
+    # Extra provenance fields (used in PDF appendix; omitted by on-screen summary)
+    description: str | None = None
+    condition_text: str | None = None
+    exception_text: str | None = None
+    normalization_note: str | None = None
+    citation_snippet: str | None = None
+
+
+class ComplianceSummarySection(BaseSchema):
+    """
+    Aggregate counts for the compliance summary, kept in one place so both
+    the JSON response and the PDF generator read the same data.
+    """
+    total: int
+    passed: int
+    failed: int
+    # 'warning' in the UI = ambiguous checks (rule not fully deterministic)
+    warning: int
+    # 'not_evaluable' = missing_input checks (metric absent from snapshot)
+    not_evaluable: int
+
+
+class IssueSummarySection(BaseSchema):
+    """
+    Condensed issue counts for the report header.
+    Mirrors PrecheckRunSummaryResponse issue counts.
+    """
+    total: int
+    critical: int
+    error: int
+    warning: int
+    info: int
+
+
+class ChecklistSummarySection(BaseSchema):
+    """Condensed checklist counts for the report."""
+    total: int
+    resolved: int
+    unresolved: int
+
+
+class RunReportData(BaseSchema):
+    """
+    GET /precheck/runs/{id}/report-data
+
+    Full structured payload consumed by both:
+      - the frontend ComplianceSummaryTab (on-screen view)
+      - the PDF generator endpoint (GET /precheck/runs/{id}/report.pdf)
+
+    Using the same struct for both ensures they can never drift apart.
+    Deterministic — no LLM calls.  Always reflects the latest completed run.
+    """
+    run_id: UUID
+    run_name: str | None = None
+    run_status: PrecheckRunStatus
+    run_created_at: datetime
+    # Staleness: True when rule approvals changed after last evaluation.
+    is_stale: bool = False
+    rules_changed_at: datetime | None = None
+
+    # Site / jurisdiction context
+    address: str | None = None
+    municipality: str | None = None
+    jurisdiction_code: str | None = None
+    zoning_district: str | None = None
+
+    # Model reference metadata
+    model_name: str | None = None
+    model_stream_id: str | None = None
+    model_synced_at: datetime | None = None
+
+    # Readiness
+    readiness: ReadinessBreakdown
+
+    # Compliance summary counts
+    compliance_summary: ComplianceSummarySection
+
+    # Detailed per-rule results (authoritative rules only)
+    compliance_results: list[ComplianceResultRow] = Field(default_factory=list)
+
+    # Issue summary counts + top issues for report
+    issue_summary: IssueSummarySection
+    # Top issues (up to 20 for the report — ordered by severity)
+    top_issues: list[ComplianceIssue] = Field(default_factory=list)
+
+    # Checklist
+    checklist_summary: ChecklistSummarySection
+    checklist_items: list[PermitChecklistItem] = Field(default_factory=list)
+
+    # Authoritative rule count used in report header
+    authoritative_rule_count: int
